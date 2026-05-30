@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { CONTAINERS, CURRENCIES, getContainerCapacity } from "../lib/config";
 import { greedySearch, balancedSearch, calculateVolume } from "../lib/algorithms";
 
@@ -35,12 +35,15 @@ export default function CashDeliveryCalculator() {
   
   const [selectedContainer, setSelectedContainer] = useState<string>("Backpack");
   const [isContainerModalOpen, setIsContainerModalOpen] = useState(false);
+  const [containerSearch, setContainerSearch] = useState("");
   
   const [results, setResults] = useState<ResultRow[]>([]);
   const [pendingConfirmation, setPendingConfirmation] = useState<ResultRow | null>(null);
 
   const [cookieConsent, setCookieConsent] = useState<boolean>(true); // Default true to avoid flash
   const [isLoaded, setIsLoaded] = useState(false);
+
+  const amountInputRef = useRef<HTMLInputElement>(null);
 
   // Load from cookies on mount
   useEffect(() => {
@@ -185,6 +188,12 @@ export default function CashDeliveryCalculator() {
 
     setResults([]);
     setPendingConfirmation(null);
+    setAmount("");
+    
+    // Let the modal unmount from the DOM first, then focus the amount input
+    setTimeout(() => {
+      amountInputRef.current?.focus();
+    }, 0);
   };
 
   return (
@@ -212,6 +221,8 @@ export default function CashDeliveryCalculator() {
                   <label className="block text-sm font-medium text-gray-400 mb-1">Job Amount</label>
                   <input 
                     type="number" 
+                    ref={amountInputRef}
+                    inputMode="numeric"
                     value={amount}
                     onChange={e => setAmount(e.target.value)}
                     className="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder-gray-500" 
@@ -267,7 +278,10 @@ export default function CashDeliveryCalculator() {
             <div className="bg-gray-800 rounded-xl p-6 shadow-lg border border-gray-700">
               <h2 className="text-lg font-semibold mb-4 text-white">Container Selection</h2>
               <button 
-                onClick={() => setIsContainerModalOpen(true)}
+                onClick={() => {
+                  setContainerSearch("");
+                  setIsContainerModalOpen(true);
+                }}
                 className="w-full flex items-center justify-between bg-gray-900 border border-gray-600 hover:border-blue-500 rounded-lg px-4 py-3 text-white transition-colors group"
               >
                 <div className="flex flex-col text-left">
@@ -301,6 +315,7 @@ export default function CashDeliveryCalculator() {
                   <div className="flex items-center space-x-2 bg-gray-800 p-2 rounded-lg border border-gray-700/50">
                     <input 
                       type="number" 
+                      inputMode="numeric"
                       value={modifiers[d.id] || ""}
                       onChange={e => setModifiers({ ...modifiers, [d.id]: e.target.value })}
                       min="0" 
@@ -309,7 +324,7 @@ export default function CashDeliveryCalculator() {
                     />
                     <button onClick={() => handleModify(d.id, 'add')} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-1.5 rounded font-bold transition-colors" title="Add to inventory">+</button>
                     <button onClick={() => handleModify(d.id, 'sub')} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-1.5 rounded font-bold transition-colors" title="Subtract from inventory">-</button>
-                    <button onClick={() => handleModify(d.id, 'set')} className="flex-1 bg-blue-600/80 hover:bg-blue-500 text-white py-1.5 rounded font-bold transition-colors text-sm" title="Set exact amount">Set</button>
+                    <button onClick={() => handleModify(d.id, 'set')} className="flex-1 bg-blue-600/80 hover:bg-blue-500 text-white py-1.5 rounded font-bold transition-colors" title="Set exact amount">Set</button>
                   </div>
                 </div>
               ))}
@@ -399,41 +414,68 @@ export default function CashDeliveryCalculator() {
               </button>
             </div>
             <div className="p-6 overflow-y-auto flex-grow bg-gray-800 rounded-b-xl space-y-6 custom-scrollbar">
-              {CONTAINERS.map(category => (
-                <div key={category.name}>
-                  <h3 className="text-lg font-bold text-gray-300 mb-3 border-b border-gray-700 pb-1">{category.name}</h3>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-                    {category.items.map(item => {
-                      const isSelected = item.name === selectedContainer;
-                      return (
-                        <button 
-                          key={item.name}
-                          onClick={() => {
-                            setSelectedContainer(item.name);
-                            setIsContainerModalOpen(false);
-                            setResults([]);
-                          }}
-                          className={`flex flex-col text-left p-3 rounded-xl border-2 transition-all ${
-                            isSelected 
-                              ? 'bg-blue-500/10 border-blue-500 shadow-lg shadow-blue-500/20 scale-[1.02]' 
-                              : 'bg-gray-900 border-gray-700 hover:border-gray-500 hover:bg-gray-800 hover:scale-[1.02]'
-                          }`}
-                        >
-                          <div className={`h-24 w-full bg-gray-800 rounded-lg mb-3 flex items-center justify-center border border-dashed ${
-                            isSelected ? 'border-blue-500/50 text-blue-500' : 'border-gray-700 text-gray-600'
-                          }`}>
-                            <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                            </svg>
-                          </div>
-                          <span className="font-bold text-white text-sm md:text-base">{item.name}</span>
-                          <span className="text-xs text-gray-400 mt-1">Vol: {item.capacity}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
+              <div className="relative mb-2">
+                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                  <svg className="h-5 w-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
                 </div>
-              ))}
+                <input
+                  autoFocus
+                  type="text"
+                  className="block w-full pl-10 pr-3 py-3 border border-gray-700 rounded-lg leading-5 bg-gray-900 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 sm:text-sm"
+                  placeholder="Search containers..."
+                  value={containerSearch}
+                  onChange={(e) => setContainerSearch(e.target.value)}
+                />
+              </div>
+
+              {(() => {
+                const filteredCategories = CONTAINERS.map(c => ({
+                  ...c,
+                  items: c.items.filter(i => i.name.toLowerCase().includes(containerSearch.toLowerCase()))
+                })).filter(c => c.items.length > 0);
+
+                if (filteredCategories.length === 0) {
+                  return <div className="text-center text-gray-500 py-12">No containers match your search.</div>;
+                }
+
+                return filteredCategories.map(category => (
+                  <div key={category.name}>
+                    <h3 className="text-lg font-bold text-gray-300 mb-3 border-b border-gray-700 pb-1">{category.name}</h3>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                      {category.items.map(item => {
+                        const isSelected = item.name === selectedContainer;
+                        return (
+                          <button 
+                            key={item.name}
+                            onClick={() => {
+                              setSelectedContainer(item.name);
+                              setIsContainerModalOpen(false);
+                              setResults([]);
+                            }}
+                            className={`flex flex-col text-left p-3 rounded-xl border-2 transition-all ${
+                              isSelected 
+                                ? 'bg-blue-500/10 border-blue-500 shadow-lg shadow-blue-500/20 scale-[1.02]' 
+                                : 'bg-gray-900 border-gray-700 hover:border-gray-500 hover:bg-gray-800 hover:scale-[1.02]'
+                            }`}
+                          >
+                            <div className={`h-24 w-full bg-gray-800 rounded-lg mb-3 flex items-center justify-center border border-dashed ${
+                              isSelected ? 'border-blue-500/50 text-blue-500' : 'border-gray-700 text-gray-600'
+                            }`}>
+                              <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                              </svg>
+                            </div>
+                            <span className="font-bold text-white text-sm md:text-base">{item.name}</span>
+                            <span className="text-xs text-gray-400 mt-1">Vol: {item.capacity}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ));
+              })()}
             </div>
           </div>
         </div>

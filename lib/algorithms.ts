@@ -63,6 +63,8 @@ export function greedySearch(
   maxResults: number = 30
 ): SearchResult[] {
   const results: SearchResult[] = [];
+  const startTime = Date.now();
+  let iters = 0;
 
   function recurse(
     index: number,
@@ -72,6 +74,9 @@ export function greedySearch(
   ) {
     if (results.length >= maxResults) return;
     if (currentTotal > desiredAmount) return;
+
+    // Prevent UI freeze on exhaustive/impossible search spaces
+    if (++iters % 1000 === 0 && Date.now() - startTime > 500) return;
 
     if (index === denominations.length) {
       if (currentTotal === desiredAmount) {
@@ -114,6 +119,8 @@ export function balancedSearch(
   maxResults: number = 50
 ): SearchResult[] {
   const results: SearchResult[] = [];
+  const startTime = Date.now();
+  let iters = 0;
 
   function recurse(
     index: number,
@@ -123,6 +130,9 @@ export function balancedSearch(
   ) {
     if (results.length >= maxResults * 2) return;
     if (currentTotal > desiredAmount) return;
+
+    // Prevent UI freeze on exhaustive/impossible search spaces
+    if (++iters % 1000 === 0 && Date.now() - startTime > 500) return;
 
     if (index === denominations.length) {
       if (currentTotal === desiredAmount) {
