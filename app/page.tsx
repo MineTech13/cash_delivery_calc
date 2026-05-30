@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import { CONTAINERS, CURRENCIES, getContainerCapacity } from "../lib/config";
-import { greedySearch, balancedSearch, calculateVolume } from "../lib/algorithms";
+import { greedySearch, balancedSearch, calculateVolume, calculateBalanceScore, type SearchResult } from "../lib/algorithms";
 
 type ResultRow = {
   comboStr: string;
@@ -29,6 +29,7 @@ export default function CashDeliveryCalculator() {
   const [currencyName, setCurrencyName] = useState<string>("USD");
   const [balancedMode, setBalancedMode] = useState(false);
   const [fullBlocksOnly, setFullBlocksOnly] = useState(false);
+  const [singleDenomOnly, setSingleDenomOnly] = useState(false);
   
   const [inventory, setInventory] = useState<Record<string, string>>({});
   const [modifiers, setModifiers] = useState<Record<string, string>>({});
@@ -45,6 +46,8 @@ export default function CashDeliveryCalculator() {
 
   const amountInputRef = useRef<HTMLInputElement>(null);
 
+  const [calcTrigger, setCalcTrigger] = useState(0); // Used to re-trigger focus on new calculations
+
   // Load from cookies on mount
   useEffect(() => {
     const consent = getCookie("cookieConsent");
@@ -60,7 +63,33 @@ export default function CashDeliveryCalculator() {
         console.error("Failed to parse saved inventory", e);
       }
     }
+
+    const savedSettings = getCookie("cashCalcSettings");
+    if (savedSettings) {
+      try {
+        const parsed = JSON.parse(savedSettings);
+        if (parsed.currencyName) setCurrencyName(parsed.currencyName);
+        if (parsed.selectedContainer) setSelectedContainer(parsed.selectedContainer);
+        if (typeof parsed.balancedMode === 'boolean') setBalancedMode(parsed.balancedMode);
+        if (typeof parsed.fullBlocksOnly === 'boolean') setFullBlocksOnly(parsed.fullBlocksOnly);
+        if (typeof parsed.singleDenomOnly === 'boolean') setSingleDenomOnly(parsed.singleDenomOnly);
+      } catch (e) {
+        console.error("Failed to parse saved settings", e);
+      }
+    }
     setIsLoaded(true);
+  }, []);
+
+  // Global keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsContainerModalOpen(false);
+        setPendingConfirmation(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
   // Save to cookies when inventory changes (if consent granted)
@@ -71,10 +100,30 @@ export default function CashDeliveryCalculator() {
     }
   }, [inventory, isLoaded, cookieConsent]);
 
+  // Save to cookies when settings change
+  useEffect(() => {
+    if (isLoaded && cookieConsent) {
+      setCookie("cashCalcSettings", JSON.stringify({
+        currencyName,
+        selectedContainer,
+        balancedMode,
+        fullBlocksOnly,
+        singleDenomOnly
+      }));
+    }
+  }, [currencyName, selectedContainer, balancedMode, fullBlocksOnly, singleDenomOnly, isLoaded, cookieConsent]);
+
   const acceptCookies = () => {
     setCookieConsent(true);
     setCookie("cookieConsent", "true");
     setCookie("cashCalcInventory", JSON.stringify(inventory));
+    setCookie("cashCalcSettings", JSON.stringify({
+      currencyName,
+      selectedContainer,
+      balancedMode,
+      fullBlocksOnly,
+      singleDenomOnly
+    }));
   };
 
   const activeCurrency = CURRENCIES[currencyName];
@@ -128,12 +177,41 @@ export default function CashDeliveryCalculator() {
       return;
     }
 
-    const searchResults = balancedMode 
-      ? balancedSearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50)
-      : greedySearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50);
+    let searchResults: SearchResult[] = [];
 
-    if (!balancedMode) {
-      searchResults.sort((a, b) => a.packs - b.packs);
+    if (singleDenomOnly) {
+      // Filter purely for single denomination results directly
+      for (let i = 0; i < denomsToUse.length; i++) {
+        const denom = denomsToUse[i];
+        const maxAvailable = maxCountsToUse[i];
+        if (desiredAmount % denom === 0) {
+          const needed = desiredAmount / denom;
+          if (needed <= maxAvailable) {
+            if (!fullBlocksOnly || needed % 30 === 0) {
+              const combo = new Array(denomsToUse.length).fill(0);
+              combo[i] = needed;
+              searchResults.push({ combo, packs: needed, total: desiredAmount });
+            }
+          }
+        }
+      }
+      if (balancedMode) {
+        searchResults.forEach(r => { r.balanceScore = calculateBalanceScore(denomsToUse, maxCountsToUse, r.combo); });
+        searchResults.sort((a, b) => {
+          if (a.balanceScore! !== b.balanceScore!) return a.balanceScore! - b.balanceScore!;
+          return a.packs - b.packs;
+        });
+      } else {
+        searchResults.sort((a, b) => a.packs - b.packs);
+      }
+    } else {
+      searchResults = balancedMode 
+        ? balancedSearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50)
+        : greedySearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50);
+
+      if (!balancedMode) {
+        searchResults.sort((a, b) => a.packs - b.packs);
+      }
     }
 
     const capacity = getContainerCapacity(selectedContainer);
@@ -169,6 +247,7 @@ export default function CashDeliveryCalculator() {
     });
 
     setResults(formattedResults.slice(0, 30));
+    setCalcTrigger(prev => prev + 1);
   };
 
   const confirmPacking = () => {
@@ -222,9 +301,13 @@ export default function CashDeliveryCalculator() {
                   <input 
                     type="number" 
                     ref={amountInputRef}
+                    autoFocus
                     inputMode="numeric"
                     value={amount}
                     onChange={e => setAmount(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') handleCalculate();
+                    }}
                     className="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder-gray-500" 
                     placeholder="e.g. 500000"
                   />
@@ -270,6 +353,15 @@ export default function CashDeliveryCalculator() {
                       className="form-checkbox h-5 w-5 text-green-500 rounded border-gray-600 bg-gray-900 focus:ring-green-500 focus:ring-offset-gray-800"
                     />
                     <span className="text-sm text-green-500 font-medium group-hover:text-green-400 transition-colors">Smart Balance (Prioritize abundant)</span>
+                  </label>
+                  <label className="flex items-center space-x-3 cursor-pointer group">
+                    <input 
+                      type="checkbox" 
+                      checked={singleDenomOnly}
+                      onChange={e => setSingleDenomOnly(e.target.checked)}
+                      className="form-checkbox h-5 w-5 text-purple-500 rounded border-gray-600 bg-gray-900 focus:ring-purple-500 focus:ring-offset-gray-800"
+                    />
+                    <span className="text-sm text-purple-400 font-medium group-hover:text-purple-300 transition-colors">Single Denomination Only</span>
                   </label>
                 </div>
               </div>
@@ -318,6 +410,9 @@ export default function CashDeliveryCalculator() {
                       inputMode="numeric"
                       value={modifiers[d.id] || ""}
                       onChange={e => setModifiers({ ...modifiers, [d.id]: e.target.value })}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') handleModify(d.id, 'add');
+                      }}
                       min="0" 
                       className="w-20 bg-gray-950 border border-gray-600 rounded px-2 py-1.5 text-white text-center font-mono focus:border-blue-500 focus:outline-none placeholder-gray-600" 
                       placeholder="0"
@@ -369,7 +464,7 @@ export default function CashDeliveryCalculator() {
                   </tr>
                 ) : (
                   results.map((r, i) => (
-                    <tr key={i} className="hover:bg-gray-800/80 transition-colors bg-gray-800">
+                    <tr key={`${calcTrigger}-${i}`} className="hover:bg-gray-800/80 transition-colors bg-gray-800">
                       <td className="p-4">
                         <span className="font-mono text-gray-300">{r.comboStr}</span>
                         {r.balanceScore !== undefined && r.balanceScore < 50 && (
@@ -385,6 +480,7 @@ export default function CashDeliveryCalculator() {
                       <td className="p-4 text-right text-gray-400">{r.containersNeeded} x {selectedContainer}</td>
                       <td className="p-4 text-center">
                         <button 
+                          autoFocus={i === 0}
                           onClick={() => setPendingConfirmation(r)}
                           className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-1.5 rounded text-sm font-semibold transition-colors"
                         >
@@ -427,6 +523,16 @@ export default function CashDeliveryCalculator() {
                   placeholder="Search containers..."
                   value={containerSearch}
                   onChange={(e) => setContainerSearch(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const filtered = CONTAINERS.flatMap(c => c.items).filter(i => i.name.toLowerCase().includes(containerSearch.toLowerCase()));
+                      if (filtered.length > 0) {
+                        setSelectedContainer(filtered[0].name);
+                        setIsContainerModalOpen(false);
+                        setResults([]);
+                      }
+                    }
+                  }}
                 />
               </div>
 
@@ -524,6 +630,7 @@ export default function CashDeliveryCalculator() {
                 CANCEL
               </button>
               <button 
+                autoFocus
                 onClick={confirmPacking} 
                 className="px-6 py-2 rounded-lg bg-green-500 hover:bg-green-600 text-white font-bold transition-colors"
               >
