@@ -1,4 +1,12 @@
 {
 	"name": "Cash Delivery Calc & Inv Manager",
-	"image": "mcr.microsoft.com/devcontainers/typescript-node:4-24-trixie"
+	"image": "mcr.microsoft.com/devcontainers/typescript-node:4-24-trixie",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"google.geminicodeassist",
+				"google.gemini-cli-vscode-ide-companion"
+			]
+		}
+	}
 }
