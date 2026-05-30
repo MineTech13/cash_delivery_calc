@@ -16,6 +16,7 @@ export const CONTAINERS: ContainerCategory[] = [
       { name: "Case", capacity: 150 },
       { name: "Gift Box", capacity: 180 },
       { name: "Small Box", capacity: 200 },
+      { name: "Aluminum Case", capacity: 200 },
       { name: "Backpack", capacity: 300 },
       { name: "Flat Box", capacity: 340 },
       { name: "Small Travelbag", capacity: 350 },

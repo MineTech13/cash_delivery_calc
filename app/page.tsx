@@ -964,12 +964,13 @@ export default function CashDeliveryCalculator() {
                 <div className="bg-gray-900 p-4 rounded-lg border border-gray-700 space-y-3">
                   <div className="grid grid-cols-2 gap-3">
                     <input type="text" placeholder="Name (e.g. Duffle Bag)" value={newContName} onChange={e => setNewContName(e.target.value)} className="bg-gray-950 border border-gray-700 rounded px-3 py-2 text-white focus:border-blue-500 focus:outline-none" />
-                    <input type="number" placeholder="Volume (e.g. 850)" value={newContVol} onChange={e => setNewContVol(e.target.value)} className="bg-gray-950 border border-gray-700 rounded px-3 py-2 text-white focus:border-blue-500 focus:outline-none" />
+                    <input type="number" placeholder="Max Packs (e.g. 50)" value={newContVol} onChange={e => setNewContVol(e.target.value)} className="bg-gray-950 border border-gray-700 rounded px-3 py-2 text-white focus:border-blue-500 focus:outline-none" />
                   </div>
                   <button 
                     onClick={() => {
                       if (!newContName || !newContVol) return;
-                      setCustomContainers(prev => [...prev, { name: newContName, capacity: parseInt(newContVol, 10) }]);
+                      // Automatically multiply packs by 5 to match the volume algorithm
+                      setCustomContainers(prev => [...prev, { name: newContName, capacity: parseInt(newContVol, 10) * 5 }]);
                       setNewContName("");
                       setNewContVol("");
                     }}
@@ -985,7 +986,7 @@ export default function CashDeliveryCalculator() {
                     <div key={c.name} className="flex justify-between items-center bg-gray-700/30 border border-gray-600 p-3 rounded">
                       <div>
                         <span className="font-bold text-white block">{c.name}</span>
-                        <span className="text-xs text-gray-400">Vol: {c.capacity}</span>
+                        <span className="text-xs text-gray-400">Holds: {c.capacity / 5} packs (Vol: {c.capacity})</span>
                       </div>
                       <button 
                         onClick={() => {
