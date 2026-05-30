@@ -9,6 +9,7 @@ type ResultRow = {
   blocks: number;
   volume: number;
   containersNeeded: number;
+  containerName: string;
   balanceScore?: number;
   combo: number[];
 };
@@ -29,7 +30,12 @@ export default function CashDeliveryCalculator() {
   const [currencyName, setCurrencyName] = useState<string>("USD");
   const [balancedMode, setBalancedMode] = useState(false);
   const [fullBlocksOnly, setFullBlocksOnly] = useState(false);
-  const [singleDenomOnly, setSingleDenomOnly] = useState(false);
+  const [targetDenom, setTargetDenom] = useState<string>("");
+
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [autoOpenContainer, setAutoOpenContainer] = useState(true);
+  const [autoConfirmBest, setAutoConfirmBest] = useState(true);
+  const [denomOrder, setDenomOrder] = useState<Record<string, string[]>>({});
   
   const [inventory, setInventory] = useState<Record<string, string>>({});
   const [modifiers, setModifiers] = useState<Record<string, string>>({});
@@ -47,6 +53,8 @@ export default function CashDeliveryCalculator() {
   const amountInputRef = useRef<HTMLInputElement>(null);
 
   const [calcTrigger, setCalcTrigger] = useState(0); // Used to re-trigger focus on new calculations
+
+  const [draggedDenom, setDraggedDenom] = useState<string | null>(null);
 
   // Load from cookies on mount
   useEffect(() => {
@@ -72,7 +80,14 @@ export default function CashDeliveryCalculator() {
         if (parsed.selectedContainer) setSelectedContainer(parsed.selectedContainer);
         if (typeof parsed.balancedMode === 'boolean') setBalancedMode(parsed.balancedMode);
         if (typeof parsed.fullBlocksOnly === 'boolean') setFullBlocksOnly(parsed.fullBlocksOnly);
-        if (typeof parsed.singleDenomOnly === 'boolean') setSingleDenomOnly(parsed.singleDenomOnly);
+        if (typeof parsed.singleDenomOnly === 'boolean' && parsed.singleDenomOnly) {
+          // Legacy migration
+          setTargetDenom("any_single");
+        }
+        if (parsed.targetDenom !== undefined) setTargetDenom(parsed.targetDenom);
+        if (typeof parsed.autoOpenContainer === 'boolean') setAutoOpenContainer(parsed.autoOpenContainer);
+        if (typeof parsed.autoConfirmBest === 'boolean') setAutoConfirmBest(parsed.autoConfirmBest);
+        if (parsed.denomOrder) setDenomOrder(parsed.denomOrder);
       } catch (e) {
         console.error("Failed to parse saved settings", e);
       }
@@ -86,6 +101,7 @@ export default function CashDeliveryCalculator() {
       if (e.key === 'Escape') {
         setIsContainerModalOpen(false);
         setPendingConfirmation(null);
+        setIsSettingsModalOpen(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -108,10 +124,13 @@ export default function CashDeliveryCalculator() {
         selectedContainer,
         balancedMode,
         fullBlocksOnly,
-        singleDenomOnly
+        targetDenom,
+        autoOpenContainer,
+        autoConfirmBest,
+        denomOrder
       }));
     }
-  }, [currencyName, selectedContainer, balancedMode, fullBlocksOnly, singleDenomOnly, isLoaded, cookieConsent]);
+  }, [currencyName, selectedContainer, balancedMode, fullBlocksOnly, targetDenom, autoOpenContainer, autoConfirmBest, denomOrder, isLoaded, cookieConsent]);
 
   const acceptCookies = () => {
     setCookieConsent(true);
@@ -122,11 +141,28 @@ export default function CashDeliveryCalculator() {
       selectedContainer,
       balancedMode,
       fullBlocksOnly,
-      singleDenomOnly
+      targetDenom,
+      autoOpenContainer,
+      autoConfirmBest,
+      denomOrder
     }));
   };
 
   const activeCurrency = CURRENCIES[currencyName];
+  
+  // Calculate the custom drag & drop priority order
+  const getOrderedDenoms = (currency: typeof activeCurrency) => {
+    const order = denomOrder[currency.name];
+    if (!order) return [...currency.denominations];
+    return [...currency.denominations].sort((a, b) => {
+      let idxA = order.indexOf(a.id);
+      let idxB = order.indexOf(b.id);
+      if (idxA === -1) idxA = 999;
+      if (idxB === -1) idxB = 999;
+      return idxA - idxB;
+    });
+  };
+  const orderedActiveDenoms = getOrderedDenoms(activeCurrency);
 
   const handleModify = (dId: string, action: 'add' | 'sub' | 'set') => {
     const val = parseInt(modifiers[dId] || "0", 10) || 0;
@@ -144,14 +180,14 @@ export default function CashDeliveryCalculator() {
     setModifiers(prev => ({ ...prev, [dId]: "" }));
   };
 
-  const handleCalculate = () => {
+  const handleCalculate = (overrideContainer?: string, autoConfirm?: boolean) => {
     const desiredAmount = parseInt(amount, 10);
     if (isNaN(desiredAmount) || desiredAmount <= 0) {
-      alert("Please enter a valid amount");
+      if (!autoConfirm) alert("Please enter a valid amount");
       return;
     }
 
-    const activeDenoms = [...activeCurrency.denominations];
+    const activeDenoms = orderedActiveDenoms;
     const denomsToUse: number[] = [];
     const maxCountsToUse: number[] = [];
     const denomLabels: string[] = [];
@@ -179,10 +215,13 @@ export default function CashDeliveryCalculator() {
 
     let searchResults: SearchResult[] = [];
 
-    if (singleDenomOnly) {
-      // Filter purely for single denomination results directly
+    if (targetDenom !== "") {
+      const targetValue = targetDenom === "any_single" ? null : parseInt(targetDenom, 10);
+      
       for (let i = 0; i < denomsToUse.length; i++) {
         const denom = denomsToUse[i];
+        if (targetValue !== null && denom !== targetValue) continue;
+        
         const maxAvailable = maxCountsToUse[i];
         if (desiredAmount % denom === 0) {
           const needed = desiredAmount / denom;
@@ -214,7 +253,8 @@ export default function CashDeliveryCalculator() {
       }
     }
 
-    const capacity = getContainerCapacity(selectedContainer);
+    const currentContainer = overrideContainer || selectedContainer;
+    const capacity = getContainerCapacity(currentContainer);
 
     const formattedResults = searchResults.map(res => {
       const volume = calculateVolume(denomsToUse, res.combo);
@@ -241,13 +281,21 @@ export default function CashDeliveryCalculator() {
         blocks: Math.floor(res.packs / 30),
         volume: Math.floor(volume),
         containersNeeded,
+        containerName: currentContainer,
         balanceScore: res.balanceScore,
         combo: fullCombo
       };
     });
 
-    setResults(formattedResults.slice(0, 30));
+    const finalResults = formattedResults.slice(0, 30);
+    setResults(finalResults);
     setCalcTrigger(prev => prev + 1);
+
+    if (autoConfirm && finalResults.length > 0) {
+      setPendingConfirmation(finalResults[0]);
+    } else if (finalResults.length === 0) {
+      alert("No valid combinations found. Check your inventory or denomination settings.");
+    }
   };
 
   const confirmPacking = () => {
@@ -280,11 +328,21 @@ export default function CashDeliveryCalculator() {
       <div className="max-w-6xl mx-auto space-y-6">
         
         {/* Header */}
-        <header className="flex justify-between items-end border-b border-gray-700 pb-4">
+        <header className="flex justify-between items-center border-b border-gray-700 pb-4">
           <div>
             <h1 className="text-3xl font-bold text-white tracking-tight">Cash Delivery Calculator</h1>
             <p className="text-gray-400 mt-1">Plan your physical cash packing operations.</p>
           </div>
+          <button 
+            onClick={() => setIsSettingsModalOpen(true)}
+            className="p-2 bg-gray-800 hover:bg-gray-700 rounded-lg border border-gray-600 transition-colors text-gray-300 ml-4 flex-shrink-0"
+            title="Settings & Flow Rules"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
         </header>
 
         {/* Main Grid */}
@@ -306,7 +364,19 @@ export default function CashDeliveryCalculator() {
                     value={amount}
                     onChange={e => setAmount(e.target.value)}
                     onKeyDown={e => {
-                      if (e.key === 'Enter') handleCalculate();
+                      if (e.key === 'Enter') {
+                        const desiredAmount = parseInt(amount, 10);
+                        if (!isNaN(desiredAmount) && desiredAmount > 0) {
+                          if (autoOpenContainer) {
+                            setContainerSearch("");
+                            setIsContainerModalOpen(true);
+                          } else {
+                            handleCalculate();
+                          }
+                        } else {
+                          alert("Please enter a valid amount first.");
+                        }
+                      }
                     }}
                     className="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder-gray-500" 
                     placeholder="e.g. 500000"
@@ -354,15 +424,20 @@ export default function CashDeliveryCalculator() {
                     />
                     <span className="text-sm text-green-500 font-medium group-hover:text-green-400 transition-colors">Smart Balance (Prioritize abundant)</span>
                   </label>
-                  <label className="flex items-center space-x-3 cursor-pointer group">
-                    <input 
-                      type="checkbox" 
-                      checked={singleDenomOnly}
-                      onChange={e => setSingleDenomOnly(e.target.checked)}
-                      className="form-checkbox h-5 w-5 text-purple-500 rounded border-gray-600 bg-gray-900 focus:ring-purple-500 focus:ring-offset-gray-800"
-                    />
-                    <span className="text-sm text-purple-400 font-medium group-hover:text-purple-300 transition-colors">Single Denomination Only</span>
-                  </label>
+                  <div className="flex items-center space-x-3 group">
+                    <select 
+                      value={targetDenom}
+                      onChange={e => setTargetDenom(e.target.value)}
+                      className="bg-gray-900 border border-gray-600 text-purple-400 rounded-lg px-2 py-1.5 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500 text-sm cursor-pointer"
+                    >
+                      <option value="">Mixed Denominations</option>
+                      <option value="any_single">Any Single Denomination</option>
+                      {activeCurrency.denominations.map(d => (
+                        <option key={d.id} value={d.value}>Only {d.label}</option>
+                      ))}
+                    </select>
+                    <span className="text-sm text-purple-400 font-medium group-hover:text-purple-300 transition-colors">Force specific bills</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -389,7 +464,7 @@ export default function CashDeliveryCalculator() {
           <div className="lg:col-span-2 bg-gray-800 rounded-xl p-6 shadow-lg border border-gray-700 flex flex-col">
             <h2 className="text-lg font-semibold mb-4 text-white">Inventory Management</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 flex-grow">
-              {activeCurrency.denominations.map(d => (
+              {orderedActiveDenoms.map(d => (
                 <div key={d.id} className="bg-gray-900 p-4 rounded-xl border border-gray-700 shadow-inner flex flex-col justify-between space-y-4">
                   <div className="flex justify-between items-start">
                     <div>
@@ -427,7 +502,7 @@ export default function CashDeliveryCalculator() {
 
             <div className="mt-8">
               <button 
-                onClick={handleCalculate}
+                onClick={() => handleCalculate()}
                 className="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-lg transition-colors shadow-lg"
               >
                 Think for me
@@ -477,7 +552,7 @@ export default function CashDeliveryCalculator() {
                       <td className="p-4 text-center font-medium text-white">{r.packs}</td>
                       <td className="p-4 text-center text-gray-400">{r.blocks}</td>
                       <td className="p-4 text-center text-gray-400">{r.volume}</td>
-                      <td className="p-4 text-right text-gray-400">{r.containersNeeded} x {selectedContainer}</td>
+                      <td className="p-4 text-right text-gray-400">{r.containersNeeded} x {r.containerName}</td>
                       <td className="p-4 text-center">
                         <button 
                           autoFocus={i === 0}
@@ -525,12 +600,15 @@ export default function CashDeliveryCalculator() {
                   onChange={(e) => setContainerSearch(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
-                      const filtered = CONTAINERS.flatMap(c => c.items).filter(i => i.name.toLowerCase().includes(containerSearch.toLowerCase()));
-                      if (filtered.length > 0) {
-                        setSelectedContainer(filtered[0].name);
-                        setIsContainerModalOpen(false);
-                        setResults([]);
+                      let matchedContainer = selectedContainer;
+                      if (containerSearch) {
+                        const filtered = CONTAINERS.flatMap(c => c.items).filter(i => i.name.toLowerCase().includes(containerSearch.toLowerCase()));
+                        if (filtered.length > 0) matchedContainer = filtered[0].name;
+                        else return; // Do nothing if search typed but no match
                       }
+                      setSelectedContainer(matchedContainer);
+                      setIsContainerModalOpen(false);
+                      setTimeout(() => handleCalculate(matchedContainer, autoConfirmBest), 0);
                     }
                   }}
                 />
@@ -558,7 +636,7 @@ export default function CashDeliveryCalculator() {
                             onClick={() => {
                               setSelectedContainer(item.name);
                               setIsContainerModalOpen(false);
-                              setResults([]);
+                              setTimeout(() => handleCalculate(item.name, autoConfirmBest), 0);
                             }}
                             className={`flex flex-col text-left p-3 rounded-xl border-2 transition-all ${
                               isSelected 
@@ -618,7 +696,7 @@ export default function CashDeliveryCalculator() {
               <div className="bg-gray-900 rounded-lg p-4 border border-gray-700">
                 <p className="text-gray-400 mb-1">Total Packs: <span className="text-white font-mono">{pendingConfirmation.packs}</span></p>
                 <p className="text-gray-400 mb-1">Volume: <span className="text-white font-mono">{pendingConfirmation.volume}</span></p>
-                <p className="text-gray-400">Required: <span className="text-white font-mono">{pendingConfirmation.containersNeeded} x {selectedContainer}</span></p>
+                <p className="text-gray-400">Required: <span className="text-white font-mono">{pendingConfirmation.containersNeeded} x {pendingConfirmation.containerName}</span></p>
               </div>
             </div>
             
@@ -636,6 +714,106 @@ export default function CashDeliveryCalculator() {
               >
                 CONFIRM PACKING
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Settings Modal */}
+      {isSettingsModalOpen && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
+          <div className="bg-gray-800 rounded-xl shadow-2xl border border-gray-600 w-full max-w-lg flex flex-col max-h-[90vh]">
+            <div className="p-5 border-b border-gray-700 flex justify-between items-center bg-gray-900 rounded-t-xl">
+              <h2 className="text-xl font-bold text-white">Workflow & Rules Settings</h2>
+              <button 
+                onClick={() => setIsSettingsModalOpen(false)} 
+                className="text-gray-400 hover:text-white p-2 text-2xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto flex-grow bg-gray-800 rounded-b-xl space-y-8 custom-scrollbar">
+              
+              <div className="space-y-4">
+                <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider">Automated Flow</h3>
+                <label className="flex items-center space-x-3 cursor-pointer group">
+                  <input 
+                    type="checkbox" 
+                    checked={autoOpenContainer}
+                    onChange={e => setAutoOpenContainer(e.target.checked)}
+                    className="form-checkbox h-5 w-5 text-blue-500 rounded border-gray-600 bg-gray-900 focus:ring-blue-500 focus:ring-offset-gray-800"
+                  />
+                  <span className="text-sm text-gray-300 group-hover:text-white transition-colors">Auto-open Container Select on Amount 'Enter'</span>
+                </label>
+                <label className="flex items-center space-x-3 cursor-pointer group">
+                  <input 
+                    type="checkbox" 
+                    checked={autoConfirmBest}
+                    onChange={e => setAutoConfirmBest(e.target.checked)}
+                    className="form-checkbox h-5 w-5 text-blue-500 rounded border-gray-600 bg-gray-900 focus:ring-blue-500 focus:ring-offset-gray-800"
+                  />
+                  <span className="text-sm text-gray-300 group-hover:text-white transition-colors">Auto-confirm best option on Container Select</span>
+                </label>
+              </div>
+
+              <div className="space-y-3">
+                <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider">Denomination Priority ({currencyName})</h3>
+                <p className="text-xs text-gray-500 mb-2">Drag and drop to set the priority in which bills are selected by the algorithm. Top is highest priority.</p>
+                <div className="space-y-2">
+                  {orderedActiveDenoms.map((d, index) => (
+                    <div
+                      key={d.id}
+                      draggable
+                      onDragStart={(e) => {
+                        e.dataTransfer.effectAllowed = "move";
+                        setDraggedDenom(d.id);
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "move";
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        if (!draggedDenom || draggedDenom === d.id) return;
+                        
+                        setDenomOrder(prev => {
+                          const current = prev[currencyName] || activeCurrency.denominations.map(x => x.id);
+                          const newOrder = [...current];
+                          const fromIdx = newOrder.indexOf(draggedDenom);
+                          let toIdx = newOrder.indexOf(d.id);
+                          if (fromIdx === -1 || toIdx === -1) return prev;
+                          
+                          newOrder.splice(fromIdx, 1);
+                          newOrder.splice(toIdx, 0, draggedDenom);
+                          
+                          return { ...prev, [currencyName]: newOrder };
+                        });
+                        setDraggedDenom(null);
+                      }}
+                      className="bg-gray-900 border border-gray-700 rounded p-3 flex items-center cursor-move hover:border-blue-500 transition-colors shadow-sm"
+                    >
+                      <svg className="w-5 h-5 text-gray-500 mr-3 hidden sm:block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8h16M4 16h16" />
+                      </svg>
+                      <span className="font-bold text-white">{d.label}</span>
+                      <span className="ml-4 mr-2 text-xs text-gray-500">Value: {d.value}</span>
+                      
+                      <div className="flex flex-col ml-auto">
+                        <button 
+                          disabled={index === 0} 
+                          onClick={() => { setDenomOrder(prev => { const cur = prev[currencyName] || activeCurrency.denominations.map(x => x.id); const idx = cur.indexOf(d.id); if (idx <= 0) return prev; const arr = [...cur]; [arr[idx], arr[idx - 1]] = [arr[idx - 1], arr[idx]]; return { ...prev, [currencyName]: arr }; }); }}
+                          className="p-1 text-gray-500 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+                        ><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" /></svg></button>
+                        <button 
+                          disabled={index === orderedActiveDenoms.length - 1} 
+                          onClick={() => { setDenomOrder(prev => { const cur = prev[currencyName] || activeCurrency.denominations.map(x => x.id); const idx = cur.indexOf(d.id); if (idx === -1 || idx === cur.length - 1) return prev; const arr = [...cur]; [arr[idx], arr[idx + 1]] = [arr[idx + 1], arr[idx]]; return { ...prev, [currencyName]: arr }; }); }}
+                          className="p-1 text-gray-500 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+                        ><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
         </div>
