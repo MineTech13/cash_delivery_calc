@@ -65,29 +65,38 @@ export type Currency = {
 };
 
 export const CURRENCIES: Record<string, Currency> = {
-  Dollars: {
-    name: "Dollars",
+  USD: {
+    name: "USD",
     denominations: [
-      { value: 10000, label: "$100", id: "10000" },
-      { value: 5000, label: "$50", id: "5000" },
-      { value: 2000, label: "$20", id: "2000" },
-      { value: 1000, label: "$10", id: "1000" },
+      { value: 10000, label: "$100", id: "10000_usd" },
+      { value: 5000, label: "$50", id: "5000_usd" },
+      { value: 2000, label: "$20", id: "2000_usd" },
+      { value: 1000, label: "$10", id: "1000_usd" },
     ],
   },
-  Euros: {
-    name: "Euros",
+  EUR: {
+    name: "EUR",
     denominations: [
-      { value: 10000, label: "€100", id: "10000e" },
-      { value: 5000, label: "€50", id: "5000e" },
-      { value: 2000, label: "€20", id: "2000e" },
+      { value: 10000, label: "€100", id: "10000_eur" },
+      { value: 5000, label: "€50", id: "5000_eur" },
+      { value: 2000, label: "€20", id: "2000_eur" },
     ],
   },
-  Yen: {
-    name: "Yen",
+  GBP: {
+    name: "GBP",
     denominations: [
-      { value: 1000000, label: "¥10,000", id: "1000000" },
-      { value: 500000, label: "¥5,000", id: "500000" },
-      { value: 100000, label: "¥1,000", id: "100000" },
+      { value: 10000, label: "£100", id: "10000_gbp" },
+      { value: 5000, label: "£50", id: "5000_gbp" },
+      { value: 2000, label: "£20", id: "2000_gbp" },
+      { value: 1000, label: "£10", id: "1000_gbp" },
+    ],
+  },
+  JPY: {
+    name: "JPY",
+    denominations: [
+      { value: 1000000, label: "¥10,000", id: "1000000_jpy" },
+      { value: 500000, label: "¥5,000", id: "500000_jpy" },
+      { value: 100000, label: "¥1,000", id: "100000_jpy" },
     ],
   },
 };
