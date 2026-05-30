@@ -12,6 +12,7 @@ type ResultRow = {
   containerName: string;
   balanceScore?: number;
   combo: number[];
+  looseStr?: string;
 };
 
 const setCookie = (name: string, value: string, days = 365) => {
@@ -31,11 +32,13 @@ export default function CashDeliveryCalculator() {
   const [balancedMode, setBalancedMode] = useState(false);
   const [fullBlocksOnly, setFullBlocksOnly] = useState(false);
   const [targetDenom, setTargetDenom] = useState<string>("");
+  const [emergencySplit, setEmergencySplit] = useState(false);
 
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [autoOpenContainer, setAutoOpenContainer] = useState(true);
   const [autoConfirmBest, setAutoConfirmBest] = useState(true);
   const [denomOrder, setDenomOrder] = useState<Record<string, string[]>>({});
+  const [isFullInventoryModalOpen, setIsFullInventoryModalOpen] = useState(false);
   
   const [inventory, setInventory] = useState<Record<string, string>>({});
   const [modifiers, setModifiers] = useState<Record<string, string>>({});
@@ -85,6 +88,7 @@ export default function CashDeliveryCalculator() {
           setTargetDenom("any_single");
         }
         if (parsed.targetDenom !== undefined) setTargetDenom(parsed.targetDenom);
+        if (typeof parsed.emergencySplit === 'boolean') setEmergencySplit(parsed.emergencySplit);
         if (typeof parsed.autoOpenContainer === 'boolean') setAutoOpenContainer(parsed.autoOpenContainer);
         if (typeof parsed.autoConfirmBest === 'boolean') setAutoConfirmBest(parsed.autoConfirmBest);
         if (parsed.denomOrder) setDenomOrder(parsed.denomOrder);
@@ -102,6 +106,7 @@ export default function CashDeliveryCalculator() {
         setIsContainerModalOpen(false);
         setPendingConfirmation(null);
         setIsSettingsModalOpen(false);
+        setIsFullInventoryModalOpen(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -125,12 +130,13 @@ export default function CashDeliveryCalculator() {
         balancedMode,
         fullBlocksOnly,
         targetDenom,
+        emergencySplit,
         autoOpenContainer,
         autoConfirmBest,
         denomOrder
       }));
     }
-  }, [currencyName, selectedContainer, balancedMode, fullBlocksOnly, targetDenom, autoOpenContainer, autoConfirmBest, denomOrder, isLoaded, cookieConsent]);
+  }, [currencyName, selectedContainer, balancedMode, fullBlocksOnly, targetDenom, emergencySplit, autoOpenContainer, autoConfirmBest, denomOrder, isLoaded, cookieConsent]);
 
   const acceptCookies = () => {
     setCookieConsent(true);
@@ -142,6 +148,7 @@ export default function CashDeliveryCalculator() {
       balancedMode,
       fullBlocksOnly,
       targetDenom,
+      emergencySplit,
       autoOpenContainer,
       autoConfirmBest,
       denomOrder
@@ -198,7 +205,9 @@ export default function CashDeliveryCalculator() {
       const count = parseInt(invStr, 10);
       if (isNaN(count) || count <= 0) continue;
       
-      const maxUseful = Math.min(count, Math.floor(desiredAmount / d.value));
+      const maxUseful = (emergencySplit || targetDenom !== "")
+        ? Math.min(count, Math.ceil(desiredAmount / d.value))
+        : Math.min(count, Math.floor(desiredAmount / d.value));
       
       if (maxUseful > 0) {
         denomsToUse.push(d.value);
@@ -219,37 +228,67 @@ export default function CashDeliveryCalculator() {
       const targetValue = targetDenom === "any_single" ? null : parseInt(targetDenom, 10);
       
       for (let i = 0; i < denomsToUse.length; i++) {
-        const denom = denomsToUse[i];
-        if (targetValue !== null && denom !== targetValue) continue;
+        const denomPackValue = denomsToUse[i];
+        if (targetValue !== null && denomPackValue !== targetValue) continue;
         
         const maxAvailable = maxCountsToUse[i];
-        if (desiredAmount % denom === 0) {
-          const needed = desiredAmount / denom;
-          if (needed <= maxAvailable) {
-            if (!fullBlocksOnly || needed % 30 === 0) {
-              const combo = new Array(denomsToUse.length).fill(0);
-              combo[i] = needed;
-              searchResults.push({ combo, packs: needed, total: desiredAmount });
-            }
+        const faceValue = denomPackValue / 100;
+        const label = denomLabels[i];
+        
+        const fullPacks = Math.floor(desiredAmount / denomPackValue);
+        const remainder = desiredAmount % denomPackValue;
+        
+        if (remainder === 0) {
+          if (fullPacks > 0 && fullPacks <= maxAvailable && (!fullBlocksOnly || fullPacks % 30 === 0)) {
+            const combo = new Array(denomsToUse.length).fill(0);
+            combo[i] = fullPacks;
+            searchResults.push({ combo, packs: fullPacks, total: desiredAmount });
+          }
+        } else if (remainder % faceValue === 0) {
+          // Always show loose bill alternatives for single denom targets if it perfectly divides
+          const looseBillsCount = remainder / faceValue;
+          const packsToConsume = fullPacks + 1;
+          if (packsToConsume <= maxAvailable && (!fullBlocksOnly || packsToConsume % 30 === 0)) {
+            const combo = new Array(denomsToUse.length).fill(0);
+            combo[i] = packsToConsume;
+            searchResults.push({
+              combo,
+              packs: packsToConsume,
+              total: desiredAmount,
+              looseStr: `Break 1x ${label} pack for ${looseBillsCount} loose bills`
+            });
           }
         }
       }
       if (balancedMode) {
         searchResults.forEach(r => { r.balanceScore = calculateBalanceScore(denomsToUse, maxCountsToUse, r.combo); });
         searchResults.sort((a, b) => {
+          const aLoose = !!a.looseStr;
+          const bLoose = !!b.looseStr;
+          if (aLoose !== bLoose) return aLoose ? 1 : -1;
           if (a.balanceScore! !== b.balanceScore!) return a.balanceScore! - b.balanceScore!;
           return a.packs - b.packs;
         });
       } else {
-        searchResults.sort((a, b) => a.packs - b.packs);
+        searchResults.sort((a, b) => {
+          const aLoose = !!a.looseStr;
+          const bLoose = !!b.looseStr;
+          if (aLoose !== bLoose) return aLoose ? 1 : -1;
+          return a.packs - b.packs;
+        });
       }
     } else {
       searchResults = balancedMode 
-        ? balancedSearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50)
-        : greedySearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50);
+        ? balancedSearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50, denomLabels, emergencySplit)
+        : greedySearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50, denomLabels, emergencySplit);
 
       if (!balancedMode) {
-        searchResults.sort((a, b) => a.packs - b.packs);
+        searchResults.sort((a, b) => {
+          const aLoose = !!a.looseStr;
+          const bLoose = !!b.looseStr;
+          if (aLoose !== bLoose) return aLoose ? 1 : -1;
+          return a.packs - b.packs;
+        });
       }
     }
 
@@ -283,7 +322,8 @@ export default function CashDeliveryCalculator() {
         containersNeeded,
         containerName: currentContainer,
         balanceScore: res.balanceScore,
-        combo: fullCombo
+        combo: fullCombo,
+        looseStr: res.looseStr
       };
     });
 
@@ -357,12 +397,17 @@ export default function CashDeliveryCalculator() {
                 <div>
                   <label className="block text-sm font-medium text-gray-400 mb-1">Job Amount</label>
                   <input 
-                    type="number" 
+                    type="text" 
                     ref={amountInputRef}
                     autoFocus
                     inputMode="numeric"
                     value={amount}
-                    onChange={e => setAmount(e.target.value)}
+                    onChange={e => {
+                      let val = e.target.value.toLowerCase();
+                      val = val.replace(/k/g, '000').replace(/m/g, '000000');
+                      val = val.replace(/[^0-9]/g, '');
+                      setAmount(val);
+                    }}
                     onKeyDown={e => {
                       if (e.key === 'Enter') {
                         const desiredAmount = parseInt(amount, 10);
@@ -438,6 +483,15 @@ export default function CashDeliveryCalculator() {
                     </select>
                     <span className="text-sm text-purple-400 font-medium group-hover:text-purple-300 transition-colors">Force specific bills</span>
                   </div>
+                  <label className="flex items-center space-x-3 cursor-pointer group pt-1">
+                    <input 
+                      type="checkbox" 
+                      checked={emergencySplit}
+                      onChange={e => setEmergencySplit(e.target.checked)}
+                      className="form-checkbox h-5 w-5 text-yellow-500 rounded border-gray-600 bg-gray-900 focus:ring-yellow-500 focus:ring-offset-gray-800"
+                    />
+                    <span className="text-sm text-yellow-500 font-medium group-hover:text-yellow-400 transition-colors">Emergency Split (Break packs for exact change)</span>
+                  </label>
                 </div>
               </div>
             </div>
@@ -462,7 +516,16 @@ export default function CashDeliveryCalculator() {
 
           {/* Right Column: Denominations */}
           <div className="lg:col-span-2 bg-gray-800 rounded-xl p-6 shadow-lg border border-gray-700 flex flex-col">
-            <h2 className="text-lg font-semibold mb-4 text-white">Inventory Management</h2>
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-lg font-semibold text-white">Inventory Management</h2>
+              <button 
+                onClick={() => setIsFullInventoryModalOpen(true)}
+                className="text-sm text-blue-400 hover:text-blue-300 transition-colors flex items-center"
+              >
+                <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" /></svg>
+                Full Inventory
+              </button>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 flex-grow">
               {orderedActiveDenoms.map(d => (
                 <div key={d.id} className="bg-gray-900 p-4 rounded-xl border border-gray-700 shadow-inner flex flex-col justify-between space-y-4">
@@ -481,14 +544,18 @@ export default function CashDeliveryCalculator() {
                   
                   <div className="flex items-center space-x-2 bg-gray-800 p-2 rounded-lg border border-gray-700/50">
                     <input 
-                      type="number" 
+                      type="text" 
                       inputMode="numeric"
                       value={modifiers[d.id] || ""}
-                      onChange={e => setModifiers({ ...modifiers, [d.id]: e.target.value })}
+                      onChange={e => {
+                        let val = e.target.value.toLowerCase();
+                        val = val.replace(/k/g, '000').replace(/m/g, '000000');
+                        val = val.replace(/[^0-9]/g, '');
+                        setModifiers({ ...modifiers, [d.id]: val });
+                      }}
                       onKeyDown={e => {
                         if (e.key === 'Enter') handleModify(d.id, 'add');
                       }}
-                      min="0" 
                       className="w-20 bg-gray-950 border border-gray-600 rounded px-2 py-1.5 text-white text-center font-mono focus:border-blue-500 focus:outline-none placeholder-gray-600" 
                       placeholder="0"
                     />
@@ -547,6 +614,9 @@ export default function CashDeliveryCalculator() {
                         )}
                         {r.balanceScore !== undefined && r.balanceScore >= 50 && r.balanceScore < 100 && (
                           <span className="text-blue-500 text-xs font-bold ml-2">*GB</span>
+                        )}
+                        {r.looseStr && (
+                          <span className="block text-yellow-400 text-xs font-bold mt-1 bg-yellow-400/10 inline-block px-2 py-0.5 rounded-sm border border-yellow-400/20">{r.looseStr}</span>
                         )}
                       </td>
                       <td className="p-4 text-center font-medium text-white">{r.packs}</td>
@@ -698,6 +768,15 @@ export default function CashDeliveryCalculator() {
                 <p className="text-gray-400 mb-1">Volume: <span className="text-white font-mono">{pendingConfirmation.volume}</span></p>
                 <p className="text-gray-400">Required: <span className="text-white font-mono">{pendingConfirmation.containersNeeded} x {pendingConfirmation.containerName}</span></p>
               </div>
+
+              {pendingConfirmation.looseStr && (
+                <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mt-4">
+                  <p className="text-yellow-400 font-bold text-sm flex items-center">
+                    <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                    ⚠️ {pendingConfirmation.looseStr}
+                  </p>
+                </div>
+              )}
             </div>
             
             <div className="p-6 bg-gray-900 border-t border-gray-700 flex justify-end space-x-4 rounded-b-xl">
@@ -814,6 +893,77 @@ export default function CashDeliveryCalculator() {
                   ))}
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Full Inventory Modal */}
+      {isFullInventoryModalOpen && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
+          <div className="bg-gray-800 rounded-xl shadow-2xl border border-gray-600 w-full max-w-4xl flex flex-col max-h-[90vh]">
+            <div className="p-5 border-b border-gray-700 flex justify-between items-center bg-gray-900 rounded-t-xl">
+              <h2 className="text-xl font-bold text-white">Full Inventory View</h2>
+              <button 
+                onClick={() => setIsFullInventoryModalOpen(false)} 
+                className="text-gray-400 hover:text-white p-2 text-2xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto flex-grow bg-gray-800 rounded-b-xl space-y-8 custom-scrollbar">
+              
+              <div className="flex justify-between items-center pb-2 border-b border-gray-700">
+                <p className="text-gray-400 text-sm">Manage all your cash stacks across every currency globally.</p>
+                <button 
+                  onClick={() => {
+                    if (window.confirm("Are you sure you want to clear ALL inventory? This cannot be undone.")) {
+                      setInventory({});
+                    }
+                  }}
+                  className="text-red-400 hover:text-red-300 text-sm font-semibold flex items-center transition-colors"
+                >
+                  <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                  Clear All
+                </button>
+              </div>
+
+              {Object.values(CURRENCIES).map(c => (
+                <div key={c.name} className="space-y-4">
+                  <h3 className="text-lg font-bold text-gray-300">{c.name}</h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                    {c.denominations.map(d => (
+                      <div key={d.id} className="bg-gray-900 p-3 rounded-xl border border-gray-700 shadow-inner flex flex-col justify-between space-y-3">
+                        <div className="flex justify-between items-start">
+                          <span className="font-bold text-gray-200 text-lg">{d.label}</span>
+                          <span className="text-xl font-mono text-white">{inventory[d.id] || "0"}</span>
+                        </div>
+                        <div className="flex items-center space-x-2 bg-gray-800 p-2 rounded-lg border border-gray-700/50">
+                          <input 
+                            type="text" 
+                            inputMode="numeric"
+                            value={modifiers[d.id] || ""}
+                            onChange={e => {
+                              let val = e.target.value.toLowerCase();
+                              val = val.replace(/k/g, '000').replace(/m/g, '000000');
+                              val = val.replace(/[^0-9]/g, '');
+                              setModifiers({ ...modifiers, [d.id]: val });
+                            }}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') handleModify(d.id, 'add');
+                            }}
+                            className="w-16 bg-gray-950 border border-gray-600 rounded px-2 py-1 text-white text-center font-mono focus:border-blue-500 focus:outline-none placeholder-gray-600 text-sm" 
+                            placeholder="0"
+                          />
+                          <button onClick={() => handleModify(d.id, 'add')} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-1 rounded font-bold transition-colors text-sm" title="Add">+</button>
+                          <button onClick={() => handleModify(d.id, 'sub')} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-1 rounded font-bold transition-colors text-sm" title="Subtract">-</button>
+                          <button onClick={() => handleModify(d.id, 'set')} className="flex-1 bg-blue-600/80 hover:bg-blue-500 text-white py-1 rounded font-bold transition-colors text-sm" title="Set exact">Set</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </div>

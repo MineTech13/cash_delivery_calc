@@ -53,6 +53,7 @@ export type SearchResult = {
   packs: number;
   total: number;
   balanceScore?: number;
+  looseStr?: string;
 };
 
 export function greedySearch(
@@ -60,7 +61,9 @@ export function greedySearch(
   maxCounts: number[],
   desiredAmount: number,
   fullBlocksOnly: boolean,
-  maxResults: number = 30
+  maxResults: number = 30,
+  labels: string[] = [],
+  emergencySplit: boolean = false
 ): SearchResult[] {
   const results: SearchResult[] = [];
   const startTime = Date.now();
@@ -86,6 +89,23 @@ export function greedySearch(
             packs: totalPacks,
             total: currentTotal,
           });
+        }
+      }
+      else if (emergencySplit && currentTotal < desiredAmount) {
+        const remainder = desiredAmount - currentTotal;
+        for (let i = 0; i < denominations.length; i++) {
+          const packValue = denominations[i];
+          const faceValue = packValue / 100;
+          if (currentCombo[i] < maxCounts[i] && packValue > remainder && remainder % faceValue === 0) {
+            const looseBills = remainder / faceValue;
+            const combo = [...currentCombo];
+            combo[i] += 1;
+            const totalPacksNew = totalPacks + 1;
+            if (!fullBlocksOnly || totalPacksNew % 30 === 0) {
+              results.push({ combo, packs: totalPacksNew, total: desiredAmount, looseStr: `Break 1x ${labels[i]} pack for ${looseBills} loose bills` });
+            }
+            break; // Just need one valid split
+          }
         }
       }
       return;
@@ -116,7 +136,9 @@ export function balancedSearch(
   maxCounts: number[],
   desiredAmount: number,
   fullBlocksOnly: boolean,
-  maxResults: number = 50
+  maxResults: number = 50,
+  labels: string[] = [],
+  emergencySplit: boolean = false
 ): SearchResult[] {
   const results: SearchResult[] = [];
   const startTime = Date.now();
@@ -142,6 +164,23 @@ export function balancedSearch(
             packs: totalPacks,
             total: currentTotal,
           });
+        }
+      }
+      else if (emergencySplit && currentTotal < desiredAmount) {
+        const remainder = desiredAmount - currentTotal;
+        for (let i = 0; i < denominations.length; i++) {
+          const packValue = denominations[i];
+          const faceValue = packValue / 100;
+          if (currentCombo[i] < maxCounts[i] && packValue > remainder && remainder % faceValue === 0) {
+            const looseBills = remainder / faceValue;
+            const combo = [...currentCombo];
+            combo[i] += 1;
+            const totalPacksNew = totalPacks + 1;
+            if (!fullBlocksOnly || totalPacksNew % 30 === 0) {
+              results.push({ combo, packs: totalPacksNew, total: desiredAmount, looseStr: `Break 1x ${labels[i]} pack for ${looseBills} loose bills` });
+            }
+            break; // Just need one valid split
+          }
         }
       }
       return;
@@ -208,6 +247,10 @@ export function balancedSearch(
     });
 
     scoredResults.sort((a, b) => {
+      const aLoose = !!a.looseStr;
+      const bLoose = !!b.looseStr;
+      if (aLoose !== bLoose) return aLoose ? 1 : -1;
+
       if (a.balanceScore! !== b.balanceScore!) {
         return a.balanceScore! - b.balanceScore!;
       }
