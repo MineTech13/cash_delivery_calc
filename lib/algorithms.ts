@@ -61,8 +61,7 @@ export function greedySearch(
   fullBlocksOnly: boolean,
   maxResults: number = 30,
   labels: string[] = [],
-  emergencySplit: boolean = false,
-  _containerCapacity: number = 1
+  emergencySplit: boolean = false
 ): SearchResult[] {
   const results: SearchResult[] = [];
   const looseResults: SearchResult[] = [];

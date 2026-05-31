@@ -300,7 +300,7 @@ export default function CashDeliveryCalculator() {
     } else {
       searchResults = balancedMode 
       ? balancedSearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50, denomLabels, emergencySplit, capacity)
-      : greedySearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50, denomLabels, emergencySplit, capacity);
+      : greedySearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50, denomLabels, emergencySplit);
 
       if (!balancedMode) {
         searchResults.sort((a, b) => {
