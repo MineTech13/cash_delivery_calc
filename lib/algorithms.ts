@@ -14,14 +14,12 @@ export function calculateBalanceScore(
   combo: number[]
 ): number {
   let score = 0;
-  let totalUsageRatio = 0;
 
   for (let i = 0; i < denominations.length; i++) {
     const count = combo[i];
     const maxCount = maxCounts[i];
     if (count > 0 && maxCount > 0) {
       const usageRatio = count / maxCount;
-      totalUsageRatio += usageRatio;
       score += usageRatio * 100;
 
       if (maxCount >= 10) {
@@ -64,7 +62,7 @@ export function greedySearch(
   maxResults: number = 30,
   labels: string[] = [],
   emergencySplit: boolean = false,
-  containerCapacity: number = 1
+  _containerCapacity: number = 1
 ): SearchResult[] {
   const results: SearchResult[] = [];
   const looseResults: SearchResult[] = [];

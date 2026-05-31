@@ -70,6 +70,7 @@ export default function CashDeliveryCalculator() {
   useEffect(() => {
     const consent = getCookie("cookieConsent");
     if (!consent) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setCookieConsent(false);
     }
     
@@ -868,7 +869,7 @@ export default function CashDeliveryCalculator() {
                     onChange={e => setAutoOpenContainer(e.target.checked)}
                     className="form-checkbox h-5 w-5 text-blue-500 rounded border-gray-600 bg-gray-900 focus:ring-blue-500 focus:ring-offset-gray-800"
                   />
-                  <span className="text-sm text-gray-300 group-hover:text-white transition-colors">Auto-open Container Select on Amount 'Enter'</span>
+          <span className="text-sm text-gray-300 group-hover:text-white transition-colors">Auto-open Container Select on Amount &apos;Enter&apos;</span>
                 </label>
                 <label className="flex items-center space-x-3 cursor-pointer group">
                   <input 
@@ -1147,7 +1148,7 @@ export default function CashDeliveryCalculator() {
                   </li>
                   <li className="flex items-start">
                     <span className="text-gray-400 text-xs font-bold mr-3 mt-0.5 bg-gray-700 border border-gray-600 px-1.5 py-0.5 rounded font-mono shadow-sm text-nowrap">1 Block = 30</span>
-                    <span className="text-sm text-gray-300">Containers hold cash in blocks of 30 packs. The "Only allow full blocks" setting restricts results to exact multiples of 30.</span>
+            <span className="text-sm text-gray-300">Containers hold cash in blocks of 30 packs. The &quot;Only allow full blocks&quot; setting restricts results to exact multiples of 30.</span>
                   </li>
                 </ul>
               </div>
