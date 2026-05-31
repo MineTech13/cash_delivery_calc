@@ -209,6 +209,9 @@ export default function CashDeliveryCalculator() {
     const maxCountsToUse: number[] = [];
     const denomLabels: string[] = [];
 
+    const currentContainer = overrideContainer || selectedContainer;
+    const capacity = getCapacity(currentContainer);
+
     for (const d of activeDenoms) {
       const invStr = inventory[d.id];
       if (!invStr) continue;
@@ -276,34 +279,40 @@ export default function CashDeliveryCalculator() {
           const aLoose = !!a.looseStr;
           const bLoose = !!b.looseStr;
           if (aLoose !== bLoose) return aLoose ? 1 : -1;
+        const aContainers = Math.ceil((a.packs * 5) / capacity);
+        const bContainers = Math.ceil((b.packs * 5) / capacity);
+        if (aContainers !== bContainers) return aContainers - bContainers;
           if (a.balanceScore! !== b.balanceScore!) return a.balanceScore! - b.balanceScore!;
-          return a.packs - b.packs;
+        return a.packs - b.packs;
         });
       } else {
         searchResults.sort((a, b) => {
           const aLoose = !!a.looseStr;
           const bLoose = !!b.looseStr;
           if (aLoose !== bLoose) return aLoose ? 1 : -1;
+        const aContainers = Math.ceil((a.packs * 5) / capacity);
+        const bContainers = Math.ceil((b.packs * 5) / capacity);
+        if (aContainers !== bContainers) return aContainers - bContainers;
           return a.packs - b.packs;
         });
       }
     } else {
       searchResults = balancedMode 
-        ? balancedSearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50, denomLabels, emergencySplit)
-        : greedySearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50, denomLabels, emergencySplit);
+      ? balancedSearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50, denomLabels, emergencySplit, capacity)
+      : greedySearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50, denomLabels, emergencySplit, capacity);
 
       if (!balancedMode) {
         searchResults.sort((a, b) => {
           const aLoose = !!a.looseStr;
           const bLoose = !!b.looseStr;
           if (aLoose !== bLoose) return aLoose ? 1 : -1;
+        const aContainers = Math.ceil((a.packs * 5) / capacity);
+        const bContainers = Math.ceil((b.packs * 5) / capacity);
+        if (aContainers !== bContainers) return aContainers - bContainers;
           return a.packs - b.packs;
         });
       }
     }
-
-    const currentContainer = overrideContainer || selectedContainer;
-    const capacity = getCapacity(currentContainer);
 
     const formattedResults = searchResults.map(res => {
       const volume = calculateVolume(denomsToUse, res.combo);

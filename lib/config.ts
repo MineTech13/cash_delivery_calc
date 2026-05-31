@@ -17,6 +17,7 @@ export const CONTAINERS: ContainerCategory[] = [
       { name: "Gift Box", capacity: 180 },
       { name: "Small Box", capacity: 200 },
       { name: "Aluminum Case", capacity: 200 },
+      { name: "Luxury Genuine Leather Premium Bag", capacity: 200 },
       { name: "Backpack", capacity: 300 },
       { name: "Flat Box", capacity: 340 },
       { name: "Small Travelbag", capacity: 350 },
@@ -83,21 +84,21 @@ export const CURRENCIES: Record<string, Currency> = {
       { value: 2000, label: "€20", id: "2000_eur" },
     ],
   },
-  GBP: {
-    name: "GBP",
-    denominations: [
-      { value: 10000, label: "£100", id: "10000_gbp" },
-      { value: 5000, label: "£50", id: "5000_gbp" },
-      { value: 2000, label: "£20", id: "2000_gbp" },
-      { value: 1000, label: "£10", id: "1000_gbp" },
-    ],
-  },
   JPY: {
     name: "JPY",
     denominations: [
       { value: 1000000, label: "¥10,000", id: "1000000_jpy" },
       { value: 500000, label: "¥5,000", id: "500000_jpy" },
       { value: 100000, label: "¥1,000", id: "100000_jpy" },
+    ],
+  },
+  GBP: {
+    name: "GBP",
+    denominations: [
+      { value: 5000, label: "£50", id: "5000_gbp" },
+      { value: 2000, label: "£20", id: "2000_gbp" },
+      { value: 1000, label: "£10", id: "1000_gbp" },
+      { value: 500, label: "£5", id: "500_gbp" },
     ],
   },
 };

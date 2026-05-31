@@ -63,9 +63,11 @@ export function greedySearch(
   fullBlocksOnly: boolean,
   maxResults: number = 30,
   labels: string[] = [],
-  emergencySplit: boolean = false
+  emergencySplit: boolean = false,
+  containerCapacity: number = 1
 ): SearchResult[] {
   const results: SearchResult[] = [];
+  const looseResults: SearchResult[] = [];
   const startTime = Date.now();
   let iters = 0;
 
@@ -92,19 +94,21 @@ export function greedySearch(
         }
       }
       else if (emergencySplit && currentTotal < desiredAmount) {
-        const remainder = desiredAmount - currentTotal;
-        for (let i = 0; i < denominations.length; i++) {
-          const packValue = denominations[i];
-          const faceValue = packValue / 100;
-          if (currentCombo[i] < maxCounts[i] && packValue > remainder && remainder % faceValue === 0) {
-            const looseBills = remainder / faceValue;
-            const combo = [...currentCombo];
-            combo[i] += 1;
-            const totalPacksNew = totalPacks + 1;
-            if (!fullBlocksOnly || totalPacksNew % 30 === 0) {
-              results.push({ combo, packs: totalPacksNew, total: desiredAmount, looseStr: `Break 1x ${labels[i]} pack for ${looseBills} loose bills` });
+        if (results.length === 0 && looseResults.length < maxResults) {
+          const remainder = desiredAmount - currentTotal;
+          for (let i = 0; i < denominations.length; i++) {
+            const packValue = denominations[i];
+            const faceValue = packValue / 100;
+            if (currentCombo[i] < maxCounts[i] && packValue > remainder && remainder % faceValue === 0) {
+              const looseBills = remainder / faceValue;
+              const combo = [...currentCombo];
+              combo[i] += 1;
+              const totalPacksNew = totalPacks + 1;
+              if (!fullBlocksOnly || totalPacksNew % 30 === 0) {
+                looseResults.push({ combo, packs: totalPacksNew, total: desiredAmount, looseStr: `Break 1x ${labels[i]} pack for ${looseBills} loose bills` });
+              }
+              break; // Just need one valid split
             }
-            break; // Just need one valid split
           }
         }
       }
@@ -128,7 +132,7 @@ export function greedySearch(
   }
 
   recurse(0, [], 0, 0);
-  return results;
+  return results.length > 0 ? results : looseResults;
 }
 
 export function balancedSearch(
@@ -138,9 +142,11 @@ export function balancedSearch(
   fullBlocksOnly: boolean,
   maxResults: number = 50,
   labels: string[] = [],
-  emergencySplit: boolean = false
+  emergencySplit: boolean = false,
+  containerCapacity: number = 1
 ): SearchResult[] {
   const results: SearchResult[] = [];
+  const looseResults: SearchResult[] = [];
   const startTime = Date.now();
   let iters = 0;
 
@@ -167,19 +173,21 @@ export function balancedSearch(
         }
       }
       else if (emergencySplit && currentTotal < desiredAmount) {
-        const remainder = desiredAmount - currentTotal;
-        for (let i = 0; i < denominations.length; i++) {
-          const packValue = denominations[i];
-          const faceValue = packValue / 100;
-          if (currentCombo[i] < maxCounts[i] && packValue > remainder && remainder % faceValue === 0) {
-            const looseBills = remainder / faceValue;
-            const combo = [...currentCombo];
-            combo[i] += 1;
-            const totalPacksNew = totalPacks + 1;
-            if (!fullBlocksOnly || totalPacksNew % 30 === 0) {
-              results.push({ combo, packs: totalPacksNew, total: desiredAmount, looseStr: `Break 1x ${labels[i]} pack for ${looseBills} loose bills` });
+        if (results.length === 0 && looseResults.length < maxResults * 2) {
+          const remainder = desiredAmount - currentTotal;
+          for (let i = 0; i < denominations.length; i++) {
+            const packValue = denominations[i];
+            const faceValue = packValue / 100;
+            if (currentCombo[i] < maxCounts[i] && packValue > remainder && remainder % faceValue === 0) {
+              const looseBills = remainder / faceValue;
+              const combo = [...currentCombo];
+              combo[i] += 1;
+              const totalPacksNew = totalPacks + 1;
+              if (!fullBlocksOnly || totalPacksNew % 30 === 0) {
+                looseResults.push({ combo, packs: totalPacksNew, total: desiredAmount, looseStr: `Break 1x ${labels[i]} pack for ${looseBills} loose bills` });
+              }
+              break; // Just need one valid split
             }
-            break; // Just need one valid split
           }
         }
       }
@@ -240,8 +248,10 @@ export function balancedSearch(
 
   recurse(0, [], 0, 0);
 
-  if (results.length > 0) {
-    const scoredResults = results.map((r) => {
+  const finalResults = results.length > 0 ? results : looseResults;
+
+  if (finalResults.length > 0) {
+    const scoredResults = finalResults.map((r) => {
       const score = calculateBalanceScore(denominations, maxCounts, r.combo);
       return { ...r, balanceScore: score };
     });
@@ -251,14 +261,21 @@ export function balancedSearch(
       const bLoose = !!b.looseStr;
       if (aLoose !== bLoose) return aLoose ? 1 : -1;
 
+      // Priority 1: Minimum containers
+      const aContainers = Math.ceil((a.packs * 5) / containerCapacity);
+      const bContainers = Math.ceil((b.packs * 5) / containerCapacity);
+      if (aContainers !== bContainers) {
+        return aContainers - bContainers;
+      }
+      // Priority 2: Best Balance Score
       if (a.balanceScore! !== b.balanceScore!) {
         return a.balanceScore! - b.balanceScore!;
       }
-      return a.packs - b.packs;
+      return a.packs - b.packs; // Priority 3: packs tiebreaker
     });
 
     return scoredResults.slice(0, maxResults);
   }
 
-  return results;
+  return finalResults;
 }
