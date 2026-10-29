@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
-import { CONTAINERS, CURRENCIES, type Currency, type ContainerItem } from "../lib/config";
+import Image from "next/image";
+import { CONTAINERS, CURRENCIES, MONEY_FORMS, LEGACY_CONTAINER_NAMES, containerMatches, type Currency, type ContainerItem, type Denomination, type MoneyKind } from "../lib/config";
 import { greedySearch, balancedSearch, calculateVolume, calculateBalanceScore, type SearchResult } from "../lib/algorithms";
 
 type ResultRow = {
@@ -13,6 +14,34 @@ type ResultRow = {
   balanceScore?: number;
   combo: number[];
   looseStr?: string;
+};
+
+// Expands k/m shorthand (15k -> 15000, 1.5m -> 1500000) and strips anything that isn't a number
+const parseShorthand = (raw: string, allowDecimal: boolean) => {
+  let val = raw.toLowerCase().replace(allowDecimal ? /[^0-9.km]/g : /[^0-9km]/g, '');
+  const match = val.match(/^(\d*\.?\d*)([km])$/);
+  if (match) {
+    const n = parseFloat(match[1] || "0") * (match[2] === 'k' ? 1000 : 1000000);
+    return Number.isFinite(n) ? String(Math.round(n * 100) / 100) : '';
+  }
+  val = val.replace(/[km]/g, '');
+  if (allowDecimal) {
+    const [whole, ...rest] = val.split('.');
+    val = rest.length > 0 ? `${whole}.${rest.join('').slice(0, 2)}` : whole;
+  }
+  return val;
+};
+
+const DenomImage = ({ d, kind, size }: { d: Denomination; kind: MoneyKind; size: "sm" | "md" }) => {
+  if (!d.image) {
+    // Custom denominations and pound coins have no game artwork
+    const dim = size === "md" ? "h-12 min-w-12 text-sm" : "h-8 min-w-8 text-xs";
+    return kind === "coins"
+      ? <span className={`${dim} px-1 rounded-full bg-gradient-to-br from-amber-200 to-amber-500 border-2 border-amber-600 text-amber-950 font-bold flex items-center justify-center shadow-inner`}>{d.label}</span>
+      : null;
+  }
+  const [w, h] = kind === "bills" ? (size === "md" ? [96, 40] : [58, 24]) : (size === "md" ? [48, 48] : [32, 32]);
+  return <Image src={d.image} alt={d.label} width={w} height={h} className={`object-contain flex-shrink-0 ${kind === "bills" ? "rounded-sm shadow" : ""}`} style={{ width: w, height: h }} />;
 };
 
 const setCookie = (name: string, value: string, days = 365) => {
@@ -29,6 +58,7 @@ const getCookie = (name: string) => {
 export default function CashDeliveryCalculator() {
   const [amount, setAmount] = useState<string>("");
   const [currencyName, setCurrencyName] = useState<string>("USD");
+  const [moneyKind, setMoneyKind] = useState<MoneyKind>("bills");
   const [balancedMode, setBalancedMode] = useState(false);
   const [fullBlocksOnly, setFullBlocksOnly] = useState(false);
   const [targetDenom, setTargetDenom] = useState<string>("");
@@ -88,7 +118,8 @@ export default function CashDeliveryCalculator() {
       try {
         const parsed = JSON.parse(savedSettings);
         if (parsed.currencyName) setCurrencyName(parsed.currencyName);
-        if (parsed.selectedContainer) setSelectedContainer(parsed.selectedContainer);
+        if (parsed.moneyKind === 'bills' || parsed.moneyKind === 'coins') setMoneyKind(parsed.moneyKind);
+        if (parsed.selectedContainer) setSelectedContainer(LEGACY_CONTAINER_NAMES[parsed.selectedContainer] || parsed.selectedContainer);
         if (typeof parsed.balancedMode === 'boolean') setBalancedMode(parsed.balancedMode);
         if (typeof parsed.fullBlocksOnly === 'boolean') setFullBlocksOnly(parsed.fullBlocksOnly);
         if (parsed.targetDenom !== undefined) setTargetDenom(parsed.targetDenom);
@@ -133,6 +164,7 @@ export default function CashDeliveryCalculator() {
     if (isLoaded && cookieConsent) {
       setCookie("cashCalcSettings", JSON.stringify({
         currencyName,
+        moneyKind,
         selectedContainer,
         balancedMode,
         fullBlocksOnly,
@@ -144,7 +176,7 @@ export default function CashDeliveryCalculator() {
         customCurrencies
       }));
     }
-  }, [currencyName, selectedContainer, balancedMode, fullBlocksOnly, targetDenom, emergencySplit, autoOpenContainer, autoConfirmBest, customContainers, customCurrencies, isLoaded, cookieConsent]);
+  }, [currencyName, moneyKind, selectedContainer, balancedMode, fullBlocksOnly, targetDenom, emergencySplit, autoOpenContainer, autoConfirmBest, customContainers, customCurrencies, isLoaded, cookieConsent]);
 
   const acceptCookies = () => {
     setCookieConsent(true);
@@ -152,6 +184,7 @@ export default function CashDeliveryCalculator() {
     setCookie("cashCalcInventory", JSON.stringify(inventory));
     setCookie("cashCalcSettings", JSON.stringify({
       currencyName,
+      moneyKind,
       selectedContainer,
       balancedMode,
       fullBlocksOnly,
@@ -166,6 +199,20 @@ export default function CashDeliveryCalculator() {
 
   const allCurrencies = { ...CURRENCIES, ...customCurrencies };
   const activeCurrency = allCurrencies[currencyName] || CURRENCIES["USD"];
+  const form = MONEY_FORMS[moneyKind];
+  const activeDenoms = (moneyKind === "coins" ? activeCurrency.coins : activeCurrency.denominations) ?? [];
+  // Coin jobs are calculated in minor units (cents) so fractional amounts stay exact
+  const amountScale = moneyKind === "coins" ? (activeCurrency.coinScale ?? 1) : 1;
+  const parsedAmount = Math.round((parseFloat(amount) || 0) * amountScale);
+  const unitLabel = form.unitNamePlural.charAt(0).toUpperCase() + form.unitNamePlural.slice(1);
+
+  const switchMoneyKind = (kind: MoneyKind) => {
+    setMoneyKind(kind);
+    setTargetDenom("");
+    setResults([]);
+    const scale = kind === "coins" ? (activeCurrency.coinScale ?? 1) : 1;
+    if (scale === 1) setAmount(prev => prev.split('.')[0]);
+  };
 
   const allContainers = [...CONTAINERS];
   if (customContainers.length > 0) {
@@ -180,7 +227,8 @@ export default function CashDeliveryCalculator() {
     }
     return 1;
   };
-  
+  const selectedContainerItem = allContainers.flatMap(c => c.items).find(i => i.name === selectedContainer);
+
 
   const handleModify = (dId: string, action: 'add' | 'sub' | 'set') => {
     const val = parseInt(modifiers[dId] || "0", 10) || 0;
@@ -199,13 +247,12 @@ export default function CashDeliveryCalculator() {
   };
 
   const handleCalculate = (overrideContainer?: string, autoConfirm?: boolean) => {
-    const desiredAmount = parseInt(amount, 10);
-    if (isNaN(desiredAmount) || desiredAmount <= 0) {
+    const desiredAmount = parsedAmount;
+    if (desiredAmount <= 0) {
       if (!autoConfirm) alert("Please enter a valid amount");
       return;
     }
 
-    const activeDenoms = activeCurrency.denominations;
     const denomsToUse: number[] = [];
     const maxCountsToUse: number[] = [];
     const denomLabels: string[] = [];
@@ -246,14 +293,14 @@ export default function CashDeliveryCalculator() {
         if (denomPackValue !== targetValue) continue;
         
         const maxAvailable = maxCountsToUse[i];
-        const faceValue = denomPackValue / 100;
+        const faceValue = denomPackValue / form.perUnit;
         const label = denomLabels[i];
         
         const fullPacks = Math.floor(desiredAmount / denomPackValue);
         const remainder = desiredAmount % denomPackValue;
         
         if (remainder === 0) {
-          if (fullPacks > 0 && fullPacks <= maxAvailable && (!fullBlocksOnly || fullPacks % 30 === 0)) {
+          if (fullPacks > 0 && fullPacks <= maxAvailable && (!fullBlocksOnly || fullPacks % form.blockSize === 0)) {
             const combo = new Array(denomsToUse.length).fill(0);
             combo[i] = fullPacks;
             searchResults.push({ combo, packs: fullPacks, total: desiredAmount });
@@ -262,14 +309,14 @@ export default function CashDeliveryCalculator() {
           // Always show loose bill alternatives for single denom targets if it perfectly divides
           const looseBillsCount = remainder / faceValue;
           const packsToConsume = fullPacks + 1;
-          if (packsToConsume <= maxAvailable && (!fullBlocksOnly || packsToConsume % 30 === 0)) {
+          if (packsToConsume <= maxAvailable && (!fullBlocksOnly || packsToConsume % form.blockSize === 0)) {
             const combo = new Array(denomsToUse.length).fill(0);
             combo[i] = packsToConsume;
             searchResults.push({
               combo,
               packs: packsToConsume,
               total: desiredAmount,
-              looseStr: `Break 1x ${label} pack for ${looseBillsCount} loose bills`
+              looseStr: `Break 1x ${label} ${form.unitName} for ${looseBillsCount} loose ${form.looseName}`
             });
           }
         }
@@ -280,8 +327,8 @@ export default function CashDeliveryCalculator() {
           const aLoose = !!a.looseStr;
           const bLoose = !!b.looseStr;
           if (aLoose !== bLoose) return aLoose ? 1 : -1;
-        const aContainers = Math.ceil((a.packs * 5) / capacity);
-        const bContainers = Math.ceil((b.packs * 5) / capacity);
+        const aContainers = Math.ceil((a.packs * form.unitVolume) / capacity);
+        const bContainers = Math.ceil((b.packs * form.unitVolume) / capacity);
         if (aContainers !== bContainers) return aContainers - bContainers;
           if (a.balanceScore! !== b.balanceScore!) return a.balanceScore! - b.balanceScore!;
         return a.packs - b.packs;
@@ -291,24 +338,24 @@ export default function CashDeliveryCalculator() {
           const aLoose = !!a.looseStr;
           const bLoose = !!b.looseStr;
           if (aLoose !== bLoose) return aLoose ? 1 : -1;
-        const aContainers = Math.ceil((a.packs * 5) / capacity);
-        const bContainers = Math.ceil((b.packs * 5) / capacity);
+        const aContainers = Math.ceil((a.packs * form.unitVolume) / capacity);
+        const bContainers = Math.ceil((b.packs * form.unitVolume) / capacity);
         if (aContainers !== bContainers) return aContainers - bContainers;
           return a.packs - b.packs;
         });
       }
     } else {
       searchResults = balancedMode 
-      ? balancedSearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50, denomLabels, emergencySplit, capacity)
-      : greedySearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50, denomLabels, emergencySplit);
+      ? balancedSearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50, denomLabels, emergencySplit, capacity, form)
+      : greedySearch(denomsToUse, maxCountsToUse, desiredAmount, fullBlocksOnly, 50, denomLabels, emergencySplit, form);
 
       if (!balancedMode) {
         searchResults.sort((a, b) => {
           const aLoose = !!a.looseStr;
           const bLoose = !!b.looseStr;
           if (aLoose !== bLoose) return aLoose ? 1 : -1;
-        const aContainers = Math.ceil((a.packs * 5) / capacity);
-        const bContainers = Math.ceil((b.packs * 5) / capacity);
+        const aContainers = Math.ceil((a.packs * form.unitVolume) / capacity);
+        const bContainers = Math.ceil((b.packs * form.unitVolume) / capacity);
         if (aContainers !== bContainers) return aContainers - bContainers;
           return a.packs - b.packs;
         });
@@ -316,7 +363,7 @@ export default function CashDeliveryCalculator() {
     }
 
     const formattedResults = searchResults.map(res => {
-      const volume = calculateVolume(denomsToUse, res.combo);
+      const volume = calculateVolume(denomsToUse, res.combo, form);
       const containersNeeded = Math.ceil(volume / capacity);
       
       const comboItems = [];
@@ -337,7 +384,7 @@ export default function CashDeliveryCalculator() {
       return {
         comboStr,
         packs: res.packs,
-        blocks: Math.floor(res.packs / 30),
+        blocks: Math.floor(res.packs / form.blockSize),
         volume: Math.floor(volume),
         containersNeeded,
         containerName: currentContainer,
@@ -363,7 +410,7 @@ export default function CashDeliveryCalculator() {
     
     setInventory(prev => {
       const next = { ...prev };
-      activeCurrency.denominations.forEach((d, idx) => {
+      activeDenoms.forEach((d, idx) => {
         const deductCount = pendingConfirmation.combo[idx];
         if (deductCount > 0) {
           const current = parseInt(next[d.id] || "0", 10) || 0;
@@ -424,23 +471,37 @@ export default function CashDeliveryCalculator() {
               
               <div className="space-y-4">
                 <div>
+                  <label className="block text-sm font-medium text-gray-400 mb-2">Delivering</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(["bills", "coins"] as const).map(kind => (
+                      <button
+                        key={kind}
+                        onClick={() => switchMoneyKind(kind)}
+                        className={`flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-colors border ${
+                          kind === moneyKind
+                            ? (kind === 'coins' ? 'bg-amber-500/15 border-amber-500 text-amber-300' : 'bg-green-500/15 border-green-500 text-green-300')
+                            : 'bg-gray-900 border-gray-600 text-gray-400 hover:text-white'
+                        }`}
+                      >
+                        <Image src={MONEY_FORMS[kind].image} alt="" width={28} height={28} className="object-contain" style={{ width: 28, height: 28 }} />
+                        {kind === 'bills' ? 'Bills' : 'Coins'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
                   <label className="block text-sm font-medium text-gray-400 mb-1">Job Amount</label>
-                  <input 
-                    type="text" 
+                  <input
+                    type="text"
                     ref={amountInputRef}
                     autoFocus
-                    inputMode="numeric"
+                    inputMode={amountScale > 1 ? "decimal" : "numeric"}
                     value={amount}
-                    onChange={e => {
-                      let val = e.target.value.toLowerCase();
-                      val = val.replace(/k/g, '000').replace(/m/g, '000000');
-                      val = val.replace(/[^0-9]/g, '');
-                      setAmount(val);
-                    }}
+                    onChange={e => setAmount(parseShorthand(e.target.value, amountScale > 1))}
                     onKeyDown={e => {
                       if (e.key === 'Enter') {
-                        const desiredAmount = parseInt(amount, 10);
-                        if (!isNaN(desiredAmount) && desiredAmount > 0) {
+                        if (parsedAmount > 0) {
                           if (autoOpenContainer) {
                             setContainerSearch("");
                             setIsContainerModalOpen(true);
@@ -453,7 +514,7 @@ export default function CashDeliveryCalculator() {
                       }
                     }}
                     className="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder-gray-500" 
-                    placeholder="e.g. 500000"
+                    placeholder={moneyKind === 'coins' ? (amountScale > 1 ? "e.g. 42.50" : "e.g. 12000") : "e.g. 500000"}
                   />
                 </div>
 
@@ -466,6 +527,8 @@ export default function CashDeliveryCalculator() {
                         onClick={() => {
                           setCurrencyName(c);
                           setResults([]);
+                          setTargetDenom("");
+                          if (moneyKind === 'coins' && (allCurrencies[c].coinScale ?? 1) === 1) setAmount(prev => prev.split('.')[0]);
                         }}
                         className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors border ${
                           c === currencyName 
@@ -487,7 +550,7 @@ export default function CashDeliveryCalculator() {
                       onChange={e => setFullBlocksOnly(e.target.checked)}
                       className="form-checkbox h-5 w-5 text-blue-500 rounded border-gray-600 bg-gray-900 focus:ring-blue-500 focus:ring-offset-gray-800"
                     />
-                    <span className="text-sm text-gray-300 group-hover:text-white transition-colors">Only allow full blocks (30 packs)</span>
+                    <span className="text-sm text-gray-300 group-hover:text-white transition-colors">Only allow full blocks ({form.blockSize} {form.unitNamePlural})</span>
                   </label>
                   <label className="flex items-center space-x-3 cursor-pointer group">
                     <input 
@@ -505,11 +568,11 @@ export default function CashDeliveryCalculator() {
                       className="bg-gray-900 border border-gray-600 text-purple-400 rounded-lg px-2 py-1.5 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500 text-sm cursor-pointer"
                     >
                       <option value="">Mixed Denominations</option>
-                      {activeCurrency.denominations.map(d => (
+                      {activeDenoms.map(d => (
                         <option key={d.id} value={d.value}>Only {d.label}</option>
                       ))}
                     </select>
-                    <span className="text-sm text-purple-400 font-medium group-hover:text-purple-300 transition-colors">Force specific bills</span>
+                    <span className="text-sm text-purple-400 font-medium group-hover:text-purple-300 transition-colors">Force specific {form.looseName}</span>
                   </div>
                   <label className="flex items-center space-x-3 cursor-pointer group pt-1">
                     <input 
@@ -518,7 +581,7 @@ export default function CashDeliveryCalculator() {
                       onChange={e => setEmergencySplit(e.target.checked)}
                       className="form-checkbox h-5 w-5 text-yellow-500 rounded border-gray-600 bg-gray-900 focus:ring-yellow-500 focus:ring-offset-gray-800"
                     />
-                    <span className="text-sm text-yellow-500 font-medium group-hover:text-yellow-400 transition-colors">Emergency Split (Break packs for exact change)</span>
+                    <span className="text-sm text-yellow-500 font-medium group-hover:text-yellow-400 transition-colors">Emergency Split (Break {form.unitNamePlural} for exact change)</span>
                   </label>
                 </div>
               </div>
@@ -533,9 +596,14 @@ export default function CashDeliveryCalculator() {
                 }}
                 className="w-full flex items-center justify-between bg-gray-900 border border-gray-600 hover:border-blue-500 rounded-lg px-4 py-3 text-white transition-colors group"
               >
-                <div className="flex flex-col text-left">
-                  <span className="font-bold text-lg">{selectedContainer}</span>
-                  <span className="text-sm text-gray-400">Volume: {getCapacity(selectedContainer)}</span>
+                <div className="flex items-center gap-3 min-w-0">
+                  {selectedContainerItem?.image && (
+                    <Image src={selectedContainerItem.image} alt="" width={48} height={48} className="object-contain flex-shrink-0" style={{ width: 48, height: 48 }} />
+                  )}
+                  <div className="flex flex-col text-left min-w-0">
+                    <span className="font-bold text-lg leading-tight">{selectedContainer}</span>
+                    <span className="text-sm text-gray-400">Capacity: {getCapacity(selectedContainer)} &middot; {Math.floor(getCapacity(selectedContainer) / form.unitVolume)} {form.unitNamePlural}</span>
+                  </div>
                 </div>
                 <span className="text-blue-500 font-semibold group-hover:text-blue-400 transition-colors">Change</span>
               </button>
@@ -555,17 +623,23 @@ export default function CashDeliveryCalculator() {
               </button>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 flex-grow">
-              {activeCurrency.denominations.map(d => (
+              {activeDenoms.length === 0 && (
+                <div className="md:col-span-2 text-center text-gray-500 py-12">{activeCurrency.name} has no coins. Switch to bills or pick another currency.</div>
+              )}
+              {activeDenoms.map(d => (
                 <div key={d.id} className="bg-gray-900 p-4 rounded-xl border border-gray-700 shadow-inner flex flex-col justify-between space-y-4">
                   <div className="flex justify-between items-start">
-                    <div>
-                      <label className="font-bold text-gray-200 flex items-center space-x-2">
-                        <span className="text-xl">{d.label}</span>
-                      </label>
-                      <span className="text-xs font-mono text-blue-400 bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 rounded mt-2 inline-block">1 Block = 30</span>
+                    <div className="flex items-center gap-3">
+                      <DenomImage d={d} kind={moneyKind} size="md" />
+                      <div>
+                        <label className="font-bold text-gray-200 flex items-center space-x-2">
+                          <span className="text-xl">{d.label}</span>
+                        </label>
+                        <span className="text-xs font-mono text-blue-400 bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 rounded mt-1 inline-block whitespace-nowrap">1 Block = {form.blockSize}</span>
+                      </div>
                     </div>
                     <div className="text-right">
-                      <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">Current</div>
+                      <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">{form.unitNamePlural}</div>
                       <div className="text-2xl font-mono text-white">{inventory[d.id] || "0"}</div>
                     </div>
                   </div>
@@ -575,12 +649,7 @@ export default function CashDeliveryCalculator() {
                       type="text" 
                       inputMode="numeric"
                       value={modifiers[d.id] || ""}
-                      onChange={e => {
-                        let val = e.target.value.toLowerCase();
-                        val = val.replace(/k/g, '000').replace(/m/g, '000000');
-                        val = val.replace(/[^0-9]/g, '');
-                        setModifiers({ ...modifiers, [d.id]: val });
-                      }}
+                      onChange={e => setModifiers({ ...modifiers, [d.id]: parseShorthand(e.target.value, false) })}
                       onKeyDown={e => {
                         if (e.key === 'Enter') handleModify(d.id, 'add');
                       }}
@@ -618,7 +687,7 @@ export default function CashDeliveryCalculator() {
               <thead>
                 <tr className="bg-gray-900 text-gray-400 text-sm">
                   <th className="p-4 font-medium">Counts</th>
-                  <th className="p-4 font-medium text-center">Packs</th>
+                  <th className="p-4 font-medium text-center">{unitLabel}</th>
                   <th className="p-4 font-medium text-center">Blocks</th>
                   <th className="p-4 font-medium text-center">Volume</th>
                   <th className="p-4 font-medium text-right">Containers Needed</th>
@@ -650,14 +719,21 @@ export default function CashDeliveryCalculator() {
                       <td className="p-4 text-center font-medium text-white">{r.packs}</td>
                       <td className="p-4 text-center text-gray-400">{r.blocks}</td>
                       <td className="p-4 text-center text-gray-400">{r.volume}</td>
-                      <td className="p-4 text-right text-gray-400">{r.containersNeeded} x {r.containerName}</td>
+                      <td className="p-4 text-right text-gray-400">
+                        <span className="inline-flex items-center justify-end gap-2">
+                          {r.containersNeeded} x {r.containerName}
+                          {selectedContainerItem?.name === r.containerName && selectedContainerItem.image && (
+                            <Image src={selectedContainerItem.image} alt="" width={28} height={28} className="object-contain" style={{ width: 28, height: 28 }} />
+                          )}
+                        </span>
+                      </td>
                       <td className="p-4 text-center">
                         <button 
                           autoFocus={i === 0}
                           onClick={() => setPendingConfirmation(r)}
                           className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-1.5 rounded text-sm font-semibold transition-colors"
                         >
-                          Use Packs
+                          Use {unitLabel}
                         </button>
                       </td>
                     </tr>
@@ -700,7 +776,7 @@ export default function CashDeliveryCalculator() {
                     if (e.key === 'Enter') {
                       let matchedContainer = selectedContainer;
                       if (containerSearch) {
-                        const filtered = allContainers.flatMap(c => c.items).filter(i => i.name.toLowerCase().includes(containerSearch.toLowerCase()));
+                        const filtered = allContainers.flatMap(c => c.items).filter(i => containerMatches(i, containerSearch) && !(i.coinsOnly && moneyKind === 'bills'));
                         if (filtered.length > 0) matchedContainer = filtered[0].name;
                         else return; // Do nothing if search typed but no match
                       }
@@ -715,7 +791,7 @@ export default function CashDeliveryCalculator() {
               {(() => {
                 const filteredCategories = allContainers.map(c => ({
                   ...c,
-                  items: c.items.filter(i => i.name.toLowerCase().includes(containerSearch.toLowerCase()))
+                  items: c.items.filter(i => containerMatches(i, containerSearch))
                 })).filter(c => c.items.length > 0);
 
                 if (filteredCategories.length === 0) {
@@ -728,29 +804,43 @@ export default function CashDeliveryCalculator() {
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
                       {category.items.map(item => {
                         const isSelected = item.name === selectedContainer;
+                        const isUnusable = !!item.coinsOnly && moneyKind === 'bills';
                         return (
                           <button 
                             key={item.name}
+                            disabled={isUnusable}
+                            title={isUnusable ? "Only holds coins" : undefined}
                             onClick={() => {
                               setSelectedContainer(item.name);
                               setIsContainerModalOpen(false);
                               setTimeout(() => handleCalculate(item.name, autoConfirmBest), 0);
                             }}
-                            className={`flex flex-col text-left p-3 rounded-xl border-2 transition-all ${
-                              isSelected 
+                            className={`relative flex flex-col text-left p-3 rounded-xl border-2 transition-all ${
+                              isUnusable
+                                ? 'bg-gray-900 border-gray-800 opacity-40 cursor-not-allowed'
+                                : isSelected 
                                 ? 'bg-blue-500/10 border-blue-500 shadow-lg shadow-blue-500/20 scale-[1.02]' 
                                 : 'bg-gray-900 border-gray-700 hover:border-gray-500 hover:bg-gray-800 hover:scale-[1.02]'
                             }`}
                           >
-                            <div className={`h-24 w-full bg-gray-800 rounded-lg mb-3 flex items-center justify-center border border-dashed ${
-                              isSelected ? 'border-blue-500/50 text-blue-500' : 'border-gray-700 text-gray-600'
+                            {item.coinsOnly && (
+                              <span className="absolute top-2 right-2 z-10 text-[10px] font-bold uppercase tracking-wide text-amber-300 bg-amber-500/15 border border-amber-500/30 px-1.5 py-0.5 rounded">Coins only</span>
+                            )}
+                            <div className={`h-24 w-full rounded-lg mb-3 flex items-center justify-center ${
+                              item.image
+                                ? 'bg-gradient-to-b from-gray-800 to-gray-900'
+                                : `bg-gray-800 border border-dashed ${isSelected ? 'border-blue-500/50 text-blue-500' : 'border-gray-700 text-gray-600'}`
                             }`}>
-                              <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                              </svg>
+                              {item.image ? (
+                                <Image src={item.image} alt="" width={88} height={88} className="object-contain drop-shadow-lg" style={{ width: 88, height: 88 }} />
+                              ) : (
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                                </svg>
+                              )}
                             </div>
-                            <span className="font-bold text-white text-sm md:text-base">{item.name}</span>
-                            <span className="text-xs text-gray-400 mt-1">Vol: {item.capacity}</span>
+                            <span className="font-bold text-white text-sm md:text-base leading-tight">{item.name}</span>
+                            <span className="text-xs text-gray-400 mt-1">Vol: {item.capacity} &middot; {Math.floor(item.capacity / form.unitVolume)} {form.unitNamePlural}</span>
                           </button>
                         );
                       })}
@@ -771,28 +861,29 @@ export default function CashDeliveryCalculator() {
               <h2 className="text-2xl font-bold mb-6 text-white border-b border-gray-700 pb-2">PACKING CONFIRMATION</h2>
               
               <div className="bg-gray-900 rounded-lg p-4 mb-6 border border-gray-700">
-                <p className="text-lg font-bold text-blue-500">Job Amount: {amount} {currencyName}</p>
+                <p className="text-lg font-bold text-blue-500">Job Amount: {amount} {currencyName} <span className="text-sm font-semibold text-gray-400">in {form.looseName}</span></p>
               </div>
               
               <div className="mb-6">
                 <h3 className="text-sm font-bold text-gray-400 mb-3 uppercase tracking-wider">Pack the following:</h3>
-                {activeCurrency.denominations.map((d, idx) => {
+                {activeDenoms.map((d, idx) => {
                   const count = pendingConfirmation.combo[idx];
-                  if (count === 0) return null;
-                  const blocks = Math.floor(count / 30);
-                  const remainder = count % 30;
-                  const blkStr = blocks > 0 ? `(${blocks} blocks${remainder > 0 ? ` and ${remainder} packs` : ''})` : '';
+                  if (!count) return null;
+                  const blocks = Math.floor(count / form.blockSize);
+                  const remainder = count % form.blockSize;
+                  const blkStr = blocks > 0 ? `(${blocks} blocks${remainder > 0 ? ` and ${remainder} ${form.unitNamePlural}` : ''})` : '';
                   
                   return (
-                    <p key={d.id} className="mb-2 text-lg text-gray-300">
-                      • <span className="font-bold text-white">{count} packs</span> {blkStr} of <span className="text-yellow-400">{d.label}</span>
+                    <p key={d.id} className="mb-2 text-lg text-gray-300 flex items-center gap-3">
+                      <DenomImage d={d} kind={moneyKind} size="sm" />
+                      <span><span className="font-bold text-white">{count} {count === 1 ? form.unitName : form.unitNamePlural}</span> {blkStr} of <span className="text-yellow-400">{d.label}</span></span>
                     </p>
                   );
                 })}
               </div>
               
               <div className="bg-gray-900 rounded-lg p-4 border border-gray-700">
-                <p className="text-gray-400 mb-1">Total Packs: <span className="text-white font-mono">{pendingConfirmation.packs}</span></p>
+                <p className="text-gray-400 mb-1">Total {unitLabel}: <span className="text-white font-mono">{pendingConfirmation.packs}</span></p>
                 <p className="text-gray-400 mb-1">Volume: <span className="text-white font-mono">{pendingConfirmation.volume}</span></p>
                 <p className="text-gray-400">Required: <span className="text-white font-mono">{pendingConfirmation.containersNeeded} x {pendingConfirmation.containerName}</span></p>
               </div>
@@ -903,7 +994,7 @@ export default function CashDeliveryCalculator() {
             <div className="p-6 overflow-y-auto flex-grow bg-gray-800 rounded-b-xl space-y-8 custom-scrollbar">
               
               <div className="flex justify-between items-center pb-2 border-b border-gray-700">
-                <p className="text-gray-400 text-sm">Manage all your cash stacks across every currency globally.</p>
+                <p className="text-gray-400 text-sm">Manage all your bill packs and coin rolls across every currency.</p>
                 <button 
                   onClick={() => {
                     if (window.confirm("Are you sure you want to clear ALL inventory? This cannot be undone.")) {
@@ -920,11 +1011,20 @@ export default function CashDeliveryCalculator() {
               {Object.values(allCurrencies).map(c => (
                 <div key={c.name} className="space-y-4">
                   <h3 className="text-lg font-bold text-gray-300">{c.name}</h3>
+                  {([["bills", c.denominations], ["coins", c.coins ?? []]] as const).filter(([, denoms]) => denoms.length > 0).map(([kind, denoms]) => (
+                  <div key={kind} className="space-y-2">
+                  <h4 className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-gray-500">
+                    <Image src={MONEY_FORMS[kind].image} alt="" width={20} height={20} className="object-contain" style={{ width: 20, height: 20 }} />
+                    {kind === 'bills' ? 'Bills' : 'Coins'} ({MONEY_FORMS[kind].unitNamePlural})
+                  </h4>
                   <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                    {c.denominations.map(d => (
+                    {denoms.map(d => (
                       <div key={d.id} className="bg-gray-900 p-3 rounded-xl border border-gray-700 shadow-inner flex flex-col justify-between space-y-3">
-                        <div className="flex justify-between items-start">
-                          <span className="font-bold text-gray-200 text-lg">{d.label}</span>
+                        <div className="flex justify-between items-center gap-2">
+                          <span className="flex items-center gap-2">
+                            <DenomImage d={d} kind={kind} size="sm" />
+                            <span className="font-bold text-gray-200 text-lg">{d.label}</span>
+                          </span>
                           <span className="text-xl font-mono text-white">{inventory[d.id] || "0"}</span>
                         </div>
                         <div className="flex items-center space-x-2 bg-gray-800 p-2 rounded-lg border border-gray-700/50">
@@ -932,12 +1032,7 @@ export default function CashDeliveryCalculator() {
                             type="text" 
                             inputMode="numeric"
                             value={modifiers[d.id] || ""}
-                            onChange={e => {
-                              let val = e.target.value.toLowerCase();
-                              val = val.replace(/k/g, '000').replace(/m/g, '000000');
-                              val = val.replace(/[^0-9]/g, '');
-                              setModifiers({ ...modifiers, [d.id]: val });
-                            }}
+                            onChange={e => setModifiers({ ...modifiers, [d.id]: parseShorthand(e.target.value, false) })}
                             onKeyDown={e => {
                               if (e.key === 'Enter') handleModify(d.id, 'add');
                             }}
@@ -951,6 +1046,8 @@ export default function CashDeliveryCalculator() {
                       </div>
                     ))}
                   </div>
+                  </div>
+                  ))}
                 </div>
               ))}
             </div>
@@ -1148,7 +1245,11 @@ export default function CashDeliveryCalculator() {
                   </li>
                   <li className="flex items-start">
                     <span className="text-gray-400 text-xs font-bold mr-3 mt-0.5 bg-gray-700 border border-gray-600 px-1.5 py-0.5 rounded font-mono shadow-sm text-nowrap">1 Block = 30</span>
-            <span className="text-sm text-gray-300">Containers hold cash in blocks of 30 packs. The &quot;Only allow full blocks&quot; setting restricts results to exact multiples of 30.</span>
+            <span className="text-sm text-gray-300"><strong>Bills:</strong> 100 bills make a pack (volume 5) and 30 packs make a block. The &quot;Only allow full blocks&quot; setting restricts results to exact multiples of 30.</span>
+                  </li>
+                  <li className="flex items-start">
+                    <span className="text-amber-300 text-xs font-bold mr-3 mt-0.5 bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.5 rounded font-mono shadow-sm text-nowrap">1 Block = 10</span>
+                    <span className="text-sm text-gray-300"><strong>Coins:</strong> 20 coins make a roll (volume 20) and 10 rolls make a coin block. Coins take far more room than bills, and the Piggy Bank only holds coins.</span>
                   </li>
                 </ul>
               </div>

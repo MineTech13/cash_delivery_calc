@@ -1,9 +1,9 @@
-export function calculateVolume(denominations: number[], combo: number[]): number {
+import { MONEY_FORMS, type MoneyForm } from "./config";
+
+export function calculateVolume(denominations: number[], combo: number[], form: MoneyForm = MONEY_FORMS.bills): number {
   let volume = 0;
   for (let i = 0; i < denominations.length; i++) {
-    const count = combo[i];
-    const totalBills = count * 100;
-    volume += totalBills * 0.1 * 0.5;
+    volume += combo[i] * form.unitVolume;
   }
   return volume;
 }
@@ -61,7 +61,8 @@ export function greedySearch(
   fullBlocksOnly: boolean,
   maxResults: number = 30,
   labels: string[] = [],
-  emergencySplit: boolean = false
+  emergencySplit: boolean = false,
+  form: MoneyForm = MONEY_FORMS.bills
 ): SearchResult[] {
   const results: SearchResult[] = [];
   const looseResults: SearchResult[] = [];
@@ -82,7 +83,7 @@ export function greedySearch(
 
     if (index === denominations.length) {
       if (currentTotal === desiredAmount) {
-        if (!fullBlocksOnly || totalPacks % 30 === 0) {
+        if (!fullBlocksOnly || totalPacks % form.blockSize === 0) {
           results.push({
             combo: [...currentCombo],
             packs: totalPacks,
@@ -95,14 +96,14 @@ export function greedySearch(
           const remainder = desiredAmount - currentTotal;
           for (let i = 0; i < denominations.length; i++) {
             const packValue = denominations[i];
-            const faceValue = packValue / 100;
+            const faceValue = packValue / form.perUnit;
             if (currentCombo[i] < maxCounts[i] && packValue > remainder && remainder % faceValue === 0) {
               const looseBills = remainder / faceValue;
               const combo = [...currentCombo];
               combo[i] += 1;
               const totalPacksNew = totalPacks + 1;
-              if (!fullBlocksOnly || totalPacksNew % 30 === 0) {
-                looseResults.push({ combo, packs: totalPacksNew, total: desiredAmount, looseStr: `Break 1x ${labels[i]} pack for ${looseBills} loose bills` });
+              if (!fullBlocksOnly || totalPacksNew % form.blockSize === 0) {
+                looseResults.push({ combo, packs: totalPacksNew, total: desiredAmount, looseStr: `Break 1x ${labels[i]} ${form.unitName} for ${looseBills} loose ${form.looseName}` });
               }
               break; // Just need one valid split
             }
@@ -140,7 +141,8 @@ export function balancedSearch(
   maxResults: number = 50,
   labels: string[] = [],
   emergencySplit: boolean = false,
-  containerCapacity: number = 1
+  containerCapacity: number = 1,
+  form: MoneyForm = MONEY_FORMS.bills
 ): SearchResult[] {
   const results: SearchResult[] = [];
   const looseResults: SearchResult[] = [];
@@ -161,7 +163,7 @@ export function balancedSearch(
 
     if (index === denominations.length) {
       if (currentTotal === desiredAmount) {
-        if (!fullBlocksOnly || totalPacks % 30 === 0) {
+        if (!fullBlocksOnly || totalPacks % form.blockSize === 0) {
           results.push({
             combo: [...currentCombo],
             packs: totalPacks,
@@ -174,14 +176,14 @@ export function balancedSearch(
           const remainder = desiredAmount - currentTotal;
           for (let i = 0; i < denominations.length; i++) {
             const packValue = denominations[i];
-            const faceValue = packValue / 100;
+            const faceValue = packValue / form.perUnit;
             if (currentCombo[i] < maxCounts[i] && packValue > remainder && remainder % faceValue === 0) {
               const looseBills = remainder / faceValue;
               const combo = [...currentCombo];
               combo[i] += 1;
               const totalPacksNew = totalPacks + 1;
-              if (!fullBlocksOnly || totalPacksNew % 30 === 0) {
-                looseResults.push({ combo, packs: totalPacksNew, total: desiredAmount, looseStr: `Break 1x ${labels[i]} pack for ${looseBills} loose bills` });
+              if (!fullBlocksOnly || totalPacksNew % form.blockSize === 0) {
+                looseResults.push({ combo, packs: totalPacksNew, total: desiredAmount, looseStr: `Break 1x ${labels[i]} ${form.unitName} for ${looseBills} loose ${form.looseName}` });
               }
               break; // Just need one valid split
             }
@@ -259,8 +261,8 @@ export function balancedSearch(
       if (aLoose !== bLoose) return aLoose ? 1 : -1;
 
       // Priority 1: Minimum containers
-      const aContainers = Math.ceil((a.packs * 5) / containerCapacity);
-      const bContainers = Math.ceil((b.packs * 5) / containerCapacity);
+      const aContainers = Math.ceil((a.packs * form.unitVolume) / containerCapacity);
+      const bContainers = Math.ceil((b.packs * form.unitVolume) / containerCapacity);
       if (aContainers !== bContainers) {
         return aContainers - bContainers;
       }
