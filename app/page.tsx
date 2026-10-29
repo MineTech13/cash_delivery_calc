@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import Image from "next/image";
-import { CONTAINERS, CURRENCIES, MONEY_FORMS, LEGACY_CONTAINER_NAMES, containerMatches, type Currency, type ContainerItem, type Denomination, type MoneyKind } from "../lib/config";
+import { CONTAINERS, CURRENCIES, MONEY_FORMS, LEGACY_CONTAINER_NAMES, containerMatches, moneyKindOf, type Currency, type ContainerItem, type Denomination, type MoneyKind } from "../lib/config";
 import { greedySearch, balancedSearch, calculateVolume, calculateBalanceScore, type SearchResult } from "../lib/algorithms";
 
 type ResultRow = {
@@ -14,7 +14,11 @@ type ResultRow = {
   balanceScore?: number;
   combo: number[];
   looseStr?: string;
+  looseDenomId?: string;
+  looseCount?: number;
 };
+
+type InventoryUnit = "packs" | "pieces";
 
 // Expands k/m shorthand (15k -> 15000, 1.5m -> 1500000) and strips anything that isn't a number.
 // Integer fields still accept a "." while typing so that 1.5k works.
@@ -75,7 +79,8 @@ const SHORTCUT_GROUPS: { title: string; items: [string[], string][] }[] = [
     title: "Inventory",
     items: [
       [["I"], "Jump to the inventory fields"],
-      [["5", "+5"], "Then Enter: add packs / rolls"],
+      [["T"], "Count inventory in packs/rolls or in single bills/coins (what the Scanner shows)"],
+      [["5", "+5"], "Then Enter: add (in the unit you count in)"],
       [["-5"], "Then Enter: subtract"],
       [["=5"], "Then Enter: set the exact count"],
       [["A"], "Open the full inventory of every currency"],
@@ -89,6 +94,24 @@ const SHORTCUT_GROUPS: { title: string; items: [string[], string][] }[] = [
     ],
   },
 ];
+
+// Inventory is stored as individual bills/coins; packs/rolls are derived from it
+const StockCount = ({ pieces, kind, unit, size }: { pieces: number; kind: MoneyKind; unit: InventoryUnit; size: "sm" | "md" }) => {
+  const form = MONEY_FORMS[kind];
+  const packs = Math.floor(pieces / form.perUnit);
+  const loose = pieces % form.perUnit;
+  const main = unit === "packs" ? packs : pieces;
+  const detail = unit === "packs"
+    ? (loose > 0 ? `+${loose} loose` : "")
+    : `= ${packs.toLocaleString("en-US")} ${packs === 1 ? form.unitName : form.unitNamePlural}${loose > 0 ? ` + ${loose}` : ""}`;
+  return (
+    <div className="text-right">
+      {size === "md" && <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">{unit === "packs" ? form.unitNamePlural : form.looseName}</div>}
+      <div className={`${size === "md" ? "text-2xl" : "text-xl"} font-mono text-white leading-tight`}>{main.toLocaleString("en-US")}</div>
+      {detail && <div className="text-[11px] font-mono text-gray-500 whitespace-nowrap">{detail}</div>}
+    </div>
+  );
+};
 
 const DenomImage = ({ d, kind, size }: { d: Denomination; kind: MoneyKind; size: "sm" | "md" }) => {
   if (!d.image) {
@@ -134,6 +157,7 @@ export default function CashDeliveryCalculator() {
   
   const [inventory, setInventory] = useState<Record<string, string>>({});
   const [modifiers, setModifiers] = useState<Record<string, string>>({});
+  const [inventoryUnit, setInventoryUnit] = useState<InventoryUnit>("packs");
   
   const [selectedContainer, setSelectedContainer] = useState<string>("Backpack");
   const [isContainerModalOpen, setIsContainerModalOpen] = useState(false);
@@ -164,13 +188,23 @@ export default function CashDeliveryCalculator() {
       setCookieConsent(false);
     }
     
+    const savedStock = getCookie("cashCalcStock");
     const savedInv = getCookie("cashCalcInventory");
-    if (savedInv) {
-      try {
-        setInventory(JSON.parse(savedInv));
-      } catch (e) {
-        console.error("Failed to parse saved inventory", e);
+    try {
+      if (savedStock) {
+        setInventory(JSON.parse(savedStock));
+      } else if (savedInv) {
+        // Older versions stored whole packs/rolls; convert them to individual bills/coins once
+        const packs: Record<string, string> = JSON.parse(savedInv);
+        const migrated: Record<string, string> = {};
+        for (const [id, count] of Object.entries(packs)) {
+          migrated[id] = String((parseInt(count, 10) || 0) * MONEY_FORMS[moneyKindOf(id)].perUnit);
+        }
+        setInventory(migrated);
+        setCookie("cashCalcInventory", "", -1);
       }
+    } catch (e) {
+      console.error("Failed to parse saved inventory", e);
     }
 
     const savedSettings = getCookie("cashCalcSettings");
@@ -186,6 +220,7 @@ export default function CashDeliveryCalculator() {
         if (typeof parsed.emergencySplit === 'boolean') setEmergencySplit(parsed.emergencySplit);
         if (typeof parsed.autoOpenContainer === 'boolean') setAutoOpenContainer(parsed.autoOpenContainer);
         if (typeof parsed.autoConfirmBest === 'boolean') setAutoConfirmBest(parsed.autoConfirmBest);
+        if (parsed.inventoryUnit === 'packs' || parsed.inventoryUnit === 'pieces') setInventoryUnit(parsed.inventoryUnit);
         if (parsed.customContainers) setCustomContainers(parsed.customContainers);
         if (parsed.customCurrencies) setCustomCurrencies(parsed.customCurrencies);
       } catch (e) {
@@ -215,7 +250,7 @@ export default function CashDeliveryCalculator() {
   useEffect(() => {
     if (isLoaded && cookieConsent) {
       // Inventory object is small, easily fits in standard 4KB cookie limit
-      setCookie("cashCalcInventory", JSON.stringify(inventory));
+      setCookie("cashCalcStock", JSON.stringify(inventory));
     }
   }, [inventory, isLoaded, cookieConsent]);
 
@@ -232,16 +267,17 @@ export default function CashDeliveryCalculator() {
         emergencySplit,
         autoOpenContainer,
         autoConfirmBest,
+        inventoryUnit,
         customContainers,
         customCurrencies
       }));
     }
-  }, [currencyName, moneyKind, selectedContainer, balancedMode, fullBlocksOnly, targetDenom, emergencySplit, autoOpenContainer, autoConfirmBest, customContainers, customCurrencies, isLoaded, cookieConsent]);
+  }, [currencyName, moneyKind, selectedContainer, balancedMode, fullBlocksOnly, targetDenom, emergencySplit, autoOpenContainer, autoConfirmBest, inventoryUnit, customContainers, customCurrencies, isLoaded, cookieConsent]);
 
   const acceptCookies = () => {
     setCookieConsent(true);
     setCookie("cookieConsent", "true");
-    setCookie("cashCalcInventory", JSON.stringify(inventory));
+    setCookie("cashCalcStock", JSON.stringify(inventory));
     setCookie("cashCalcSettings", JSON.stringify({
       currencyName,
       moneyKind,
@@ -252,6 +288,7 @@ export default function CashDeliveryCalculator() {
       emergencySplit,
       autoOpenContainer,
       autoConfirmBest,
+      inventoryUnit,
       customContainers,
       customCurrencies
     }));
@@ -267,6 +304,7 @@ export default function CashDeliveryCalculator() {
     ? Math.floor(parseFloat(amount) || 0)
     : Math.round((parseFloat(amount) || 0) * amountScale);
   const unitLabel = form.unitNamePlural.charAt(0).toUpperCase() + form.unitNamePlural.slice(1);
+  const looseLabel = form.looseName.charAt(0).toUpperCase() + form.looseName.slice(1);
 
   const switchMoneyKind = (kind: MoneyKind) => {
     setMoneyKind(kind);
@@ -314,7 +352,8 @@ export default function CashDeliveryCalculator() {
 
   const handleModify = (dId: string, action?: 'add' | 'sub' | 'set') => {
     const raw = modifiers[dId] || "";
-    const val = parseInt(raw.replace(/^[+\-=]/, ''), 10) || 0;
+    const typed = parseInt(raw.replace(/^[+\-=]/, ''), 10) || 0;
+    const val = inventoryUnit === "packs" ? typed * MONEY_FORMS[moneyKindOf(dId)].perUnit : typed;
     // Without an explicit button, the typed prefix decides: -5 subtracts, =5 sets, anything else adds
     action = action ?? (raw.startsWith('-') ? 'sub' : raw.startsWith('=') ? 'set' : 'add');
 
@@ -348,8 +387,8 @@ export default function CashDeliveryCalculator() {
     for (const d of activeDenoms) {
       const invStr = inventory[d.id];
       if (!invStr) continue;
-      const count = parseInt(invStr, 10);
-      if (isNaN(count) || count <= 0) continue;
+      const count = Math.floor((parseInt(invStr, 10) || 0) / form.perUnit);
+      if (count <= 0) continue;
       
       const maxUseful = (emergencySplit || targetDenom !== "")
         ? Math.min(count, Math.ceil(desiredAmount / d.value))
@@ -402,7 +441,9 @@ export default function CashDeliveryCalculator() {
               combo,
               packs: packsToConsume,
               total: desiredAmount,
-              looseStr: `Break 1x ${label} ${form.unitName} for ${looseBillsCount} loose ${form.looseName}`
+              looseStr: `Break 1x ${label} ${form.unitName} for ${looseBillsCount} loose ${form.looseName}`,
+              looseIndex: i,
+              looseCount: looseBillsCount
             });
           }
         }
@@ -476,7 +517,9 @@ export default function CashDeliveryCalculator() {
         containerName: currentContainer,
         balanceScore: res.balanceScore,
         combo: fullCombo,
-        looseStr: res.looseStr
+        looseStr: res.looseStr,
+        looseDenomId: res.looseIndex !== undefined ? activeDenoms.find(d => d.value === denomsToUse[res.looseIndex!])?.id : undefined,
+        looseCount: res.looseCount
       };
     });
 
@@ -498,10 +541,13 @@ export default function CashDeliveryCalculator() {
     setInventory(prev => {
       const next = { ...prev };
       activeDenoms.forEach((d, idx) => {
-        const deductCount = pendingConfirmation.combo[idx];
-        if (deductCount > 0) {
+        const packs = pendingConfirmation.combo[idx];
+        if (packs > 0) {
+          let used = packs * form.perUnit;
+          // A broken pack/roll only gives up the loose bills/coins the job needs; the rest stays in stock
+          if (d.id === pendingConfirmation.looseDenomId) used -= form.perUnit - (pendingConfirmation.looseCount ?? 0);
           const current = parseInt(next[d.id] || "0", 10) || 0;
-          next[d.id] = Math.max(0, current - deductCount).toString();
+          next[d.id] = Math.max(0, current - used).toString();
         }
       });
       return next;
@@ -558,12 +604,16 @@ export default function CashDeliveryCalculator() {
           setIsFullInventoryModalOpen(false);
           setIsCustomDataModalOpen(false);
           setIsHelpModalOpen(false);
-        } else if (document.activeElement === amountInputRef.current) {
-          // Second Esc in the amount field starts a fresh job
-          setAmount("");
-          setResults([]);
+          focusAmount();
+        } else {
+          if (document.activeElement === amountInputRef.current) {
+            // Second Esc in the amount field starts a fresh job
+            setAmount("");
+            setResults([]);
+          }
+          // Focus right away so a shortcut typed straight after Esc is not swallowed by another field
+          amountInputRef.current?.focus();
         }
-        focusAmount();
         return;
       }
       if (anyModalOpen || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -608,6 +658,10 @@ export default function CashDeliveryCalculator() {
         const next = options[(options.indexOf(targetDenom) + 1) % options.length];
         setTargetDenom(next);
         flash(next === "" ? "Mixed denominations" : `Only ${activeDenoms.find(d => String(d.value) === next)?.label}`);
+      } else if (key === 't') {
+        const next = inventoryUnit === 'packs' ? 'pieces' : 'packs';
+        setInventoryUnit(next);
+        flash(next === 'pieces' ? `Inventory in single ${form.looseName} (Scanner count)` : `Inventory in ${form.unitNamePlural}`);
       } else if (key === 'o') {
         openContainerPicker();
       } else if (key === 'r') {
@@ -828,8 +882,24 @@ export default function CashDeliveryCalculator() {
 
           {/* Right Column: Denominations */}
           <div className="lg:col-span-2 bg-gray-800 rounded-xl p-6 shadow-lg border border-gray-700 flex flex-col">
-            <div className="flex justify-between items-center mb-4">
+            <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
               <h2 className="text-lg font-semibold text-white flex items-center gap-2">Inventory Management <Key k="I" /></h2>
+              <div className="flex flex-wrap items-center gap-4">
+              <div role="radiogroup" aria-label="Count inventory in" className="flex items-center gap-1 bg-gray-900 border border-gray-700 rounded-lg p-0.5 text-xs font-semibold" title="Single bills/coins match what the in-game Scanner shows">
+                <span className="px-2 text-gray-500">Count in</span>
+                {(["packs", "pieces"] as const).map(u => (
+                  <button
+                    key={u}
+                    role="radio"
+                    aria-checked={inventoryUnit === u}
+                    onClick={() => setInventoryUnit(u)}
+                    className={`px-2.5 py-1 rounded-md transition-colors ${inventoryUnit === u ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
+                  >
+                    {u === 'packs' ? unitLabel : looseLabel}
+                  </button>
+                ))}
+                <Key k="T" className="mx-1" />
+              </div>
               <button 
                 onClick={() => setIsFullInventoryModalOpen(true)}
                 className="text-sm text-blue-400 hover:text-blue-300 transition-colors flex items-center"
@@ -838,6 +908,7 @@ export default function CashDeliveryCalculator() {
                 Full Inventory
                 <Key k="A" className="ml-2" />
               </button>
+              </div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 flex-grow">
               {activeDenoms.length === 0 && (
@@ -845,7 +916,7 @@ export default function CashDeliveryCalculator() {
               )}
               {activeDenoms.map(d => (
                 <div key={d.id} className="bg-gray-900 p-4 rounded-xl border border-gray-700 shadow-inner flex flex-col justify-between space-y-4">
-                  <div className="flex justify-between items-start">
+                  <div className="flex flex-wrap justify-between items-start gap-2">
                     <div className="flex items-center gap-3">
                       <DenomImage d={d} kind={moneyKind} size="md" />
                       <div>
@@ -855,9 +926,8 @@ export default function CashDeliveryCalculator() {
                         <span className="text-xs font-mono text-blue-400 bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 rounded mt-1 inline-block whitespace-nowrap">1 Block = {form.blockSize}</span>
                       </div>
                     </div>
-                    <div className="text-right">
-                      <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">{form.unitNamePlural}</div>
-                      <div className="text-2xl font-mono text-white">{inventory[d.id] || "0"}</div>
+                    <div className="ml-auto">
+                      <StockCount pieces={parseInt(inventory[d.id] || "0", 10) || 0} kind={moneyKind} unit={inventoryUnit} size="md" />
                     </div>
                   </div>
                   
@@ -866,7 +936,7 @@ export default function CashDeliveryCalculator() {
                       type="text" 
                       inputMode="numeric"
                       data-inv-input="main"
-                      title="5 or +5 adds, -5 subtracts, =5 sets"
+                      title={`In ${inventoryUnit === "packs" ? "packs/rolls" : "single bills/coins"}: 5 or +5 adds, -5 subtracts, =5 sets`}
                       value={modifiers[d.id] || ""}
                       onChange={e => setModifiers({ ...modifiers, [d.id]: parseModifier(e.target.value) })}
                       onKeyDown={e => {
@@ -1197,6 +1267,28 @@ export default function CashDeliveryCalculator() {
                 </label>
               </div>
 
+              <div className="space-y-3">
+                <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider">Inventory Entry</h3>
+                {([
+                  ["packs", "Packs / rolls", "Type how many full packs (100 bills) or rolls (20 coins) you have."],
+                  ["pieces", "Single bills / coins", "Type the totals the in-game Scanner shows; packs and rolls are worked out for you."],
+                ] as const).map(([value, title, text]) => (
+                  <label key={value} className="flex items-start space-x-3 cursor-pointer group">
+                    <input
+                      type="radio"
+                      name="inventoryUnit"
+                      checked={inventoryUnit === value}
+                      onChange={() => setInventoryUnit(value)}
+                      className="form-radio h-5 w-5 mt-0.5 text-blue-500 border-gray-600 bg-gray-900 focus:ring-blue-500 focus:ring-offset-gray-800"
+                    />
+                    <span className="text-sm">
+                      <span className="block text-gray-200 group-hover:text-white font-medium">{title}</span>
+                      <span className="block text-gray-500">{text}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+
             </div>
           </div>
         </div>
@@ -1218,7 +1310,7 @@ export default function CashDeliveryCalculator() {
             <div className="p-6 overflow-y-auto flex-grow bg-gray-800 rounded-b-xl space-y-8 custom-scrollbar">
               
               <div className="flex justify-between items-center pb-2 border-b border-gray-700">
-                <p className="text-gray-400 text-sm">Manage all your bill packs and coin rolls across every currency.</p>
+                <p className="text-gray-400 text-sm">Manage all your bills and coins across every currency. Counting in {inventoryUnit === "packs" ? "packs / rolls" : "single bills / coins"} (switch with T).</p>
                 <button 
                   onClick={() => {
                     if (window.confirm("Are you sure you want to clear ALL inventory? This cannot be undone.")) {
@@ -1244,19 +1336,19 @@ export default function CashDeliveryCalculator() {
                   <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                     {denoms.map(d => (
                       <div key={d.id} className="bg-gray-900 p-3 rounded-xl border border-gray-700 shadow-inner flex flex-col justify-between space-y-3">
-                        <div className="flex justify-between items-center gap-2">
+                        <div className="flex flex-wrap justify-between items-center gap-2">
                           <span className="flex items-center gap-2">
                             <DenomImage d={d} kind={kind} size="sm" />
                             <span className="font-bold text-gray-200 text-lg">{d.label}</span>
                           </span>
-                          <span className="text-xl font-mono text-white">{inventory[d.id] || "0"}</span>
+                          <StockCount pieces={parseInt(inventory[d.id] || "0", 10) || 0} kind={kind} unit={inventoryUnit} size="sm" />
                         </div>
                         <div className="flex items-center space-x-2 bg-gray-800 p-2 rounded-lg border border-gray-700/50">
                           <input 
                             type="text" 
                             inputMode="numeric"
                             data-inv-input="full"
-                            title="5 or +5 adds, -5 subtracts, =5 sets"
+                            title={`In ${inventoryUnit === "packs" ? "packs/rolls" : "single bills/coins"}: 5 or +5 adds, -5 subtracts, =5 sets`}
                             value={modifiers[d.id] || ""}
                             onChange={e => setModifiers({ ...modifiers, [d.id]: parseModifier(e.target.value) })}
                             onKeyDown={e => {

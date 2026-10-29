@@ -129,6 +129,10 @@ export const MONEY_FORMS: Record<MoneyKind, MoneyForm> = {
   },
 };
 
+// Bills and coins share one inventory map; coin ids end in "_coin"
+export const moneyKindOf = (denominationId: string): MoneyKind =>
+  denominationId.endsWith("_coin") ? "coins" : "bills";
+
 export type Denomination = {
   value: number; // value of one full pack / roll, in the currency's base units for this money kind
   label: string;

@@ -52,6 +52,9 @@ export type SearchResult = {
   total: number;
   balanceScore?: number;
   looseStr?: string;
+  // Emergency split: index of the broken pack/roll and how many of its bills/coins are used
+  looseIndex?: number;
+  looseCount?: number;
 };
 
 export function greedySearch(
@@ -103,7 +106,7 @@ export function greedySearch(
               combo[i] += 1;
               const totalPacksNew = totalPacks + 1;
               if (!fullBlocksOnly || totalPacksNew % form.blockSize === 0) {
-                looseResults.push({ combo, packs: totalPacksNew, total: desiredAmount, looseStr: `Break 1x ${labels[i]} ${form.unitName} for ${looseBills} loose ${form.looseName}` });
+                looseResults.push({ combo, packs: totalPacksNew, total: desiredAmount, looseStr: `Break 1x ${labels[i]} ${form.unitName} for ${looseBills} loose ${form.looseName}`, looseIndex: i, looseCount: looseBills });
               }
               break; // Just need one valid split
             }
@@ -183,7 +186,7 @@ export function balancedSearch(
               combo[i] += 1;
               const totalPacksNew = totalPacks + 1;
               if (!fullBlocksOnly || totalPacksNew % form.blockSize === 0) {
-                looseResults.push({ combo, packs: totalPacksNew, total: desiredAmount, looseStr: `Break 1x ${labels[i]} ${form.unitName} for ${looseBills} loose ${form.looseName}` });
+                looseResults.push({ combo, packs: totalPacksNew, total: desiredAmount, looseStr: `Break 1x ${labels[i]} ${form.unitName} for ${looseBills} loose ${form.looseName}`, looseIndex: i, looseCount: looseBills });
               }
               break; // Just need one valid split
             }
