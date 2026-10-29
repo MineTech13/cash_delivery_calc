@@ -35,12 +35,6 @@ const parseShorthand = (raw: string, allowDecimal: boolean) => {
   return rest.length > 0 ? `${whole}.${rest.join('').slice(0, allowDecimal ? 2 : 1)}` : whole;
 };
 
-// Inventory fields accept "5" or "+5" (add), "-5" (subtract) and "=5" (set)
-const parseModifier = (raw: string) => {
-  const sign = raw.trim().match(/^[+\-=]/)?.[0] ?? '';
-  return sign + parseShorthand(raw.replace(/^\s*[+\-=]/, ''), false);
-};
-
 const moveFocus = (current: HTMLElement, selector: string, delta: number) => {
   const list = Array.from(document.querySelectorAll<HTMLElement>(selector));
   list[list.indexOf(current) + delta]?.focus();
@@ -56,6 +50,7 @@ const SHORTCUT_GROUPS: { title: string; items: [string[], string][] }[] = [
     items: [
       [["Enter"], "Amount → container picker → confirm the best packing"],
       [["↑", "↓"], "Move through containers, results and inventory fields"],
+      [["Letters"], "All shortcuts also work while an amount or inventory field is focused"],
       [["Esc"], "Close any window and jump back to the amount field"],
       [["Esc", "Esc"], "Clear the amount and results for a new job"],
       [["R"], "Jump to the calculated results"],
@@ -78,11 +73,12 @@ const SHORTCUT_GROUPS: { title: string; items: [string[], string][] }[] = [
   {
     title: "Inventory",
     items: [
-      [["I"], "Jump to the inventory fields"],
+      [["I"], "Jump to the first inventory field"],
       [["T"], "Count inventory in packs/rolls or in single bills/coins (what the Scanner shows)"],
-      [["5", "+5"], "Then Enter: add (in the unit you count in)"],
-      [["-5"], "Then Enter: subtract"],
-      [["=5"], "Then Enter: set the exact count"],
+      [["Enter"], "Set the typed number as the new count, then go to the next field"],
+      [["+"], "Add the typed number, then go to the next field"],
+      [["-"], "Remove the typed number, then go to the next field"],
+      [["Tab"], "Skip to the next field without changing it (Shift+Tab goes back)"],
       [["A"], "Open the full inventory of every currency"],
     ],
   },
@@ -350,12 +346,19 @@ export default function CashDeliveryCalculator() {
   const selectedContainerItem = allContainers.flatMap(c => c.items).find(i => i.name === selectedContainer);
 
 
-  const handleModify = (dId: string, action?: 'add' | 'sub' | 'set') => {
-    const raw = modifiers[dId] || "";
-    const typed = parseInt(raw.replace(/^[+\-=]/, ''), 10) || 0;
-    const val = inventoryUnit === "packs" ? typed * MONEY_FORMS[moneyKindOf(dId)].perUnit : typed;
-    // Without an explicit button, the typed prefix decides: -5 subtracts, =5 sets, anything else adds
-    action = action ?? (raw.startsWith('-') ? 'sub' : raw.startsWith('=') ? 'set' : 'add');
+  const handleModify = (dId: string, action: 'add' | 'sub' | 'set') => {
+    const kind = moneyKindOf(dId);
+    const typed = parseInt(modifiers[dId] || "0", 10) || 0;
+    const val = inventoryUnit === "packs" ? typed * MONEY_FORMS[kind].perUnit : typed;
+
+    const current = parseInt(inventory[dId] || "0", 10) || 0;
+    const result = action === 'add' ? current + val : action === 'sub' ? Math.max(0, current - val) : Math.max(0, val);
+    const label = Object.values(allCurrencies).flatMap(c => [...c.denominations, ...(c.coins ?? [])]).find(d => d.id === dId)?.label ?? dId;
+    const form = MONEY_FORMS[kind];
+    const shown = inventoryUnit === "packs"
+      ? `${Math.floor(result / form.perUnit).toLocaleString("en-US")} ${form.unitNamePlural}`
+      : `${result.toLocaleString("en-US")} ${form.looseName}`;
+    flash(`${label}: ${shown}`);
 
     setInventory(prev => {
       const current = parseInt(prev[dId] || "0", 10) || 0;
@@ -367,6 +370,38 @@ export default function CashDeliveryCalculator() {
     });
 
     setModifiers(prev => ({ ...prev, [dId]: "" }));
+  };
+
+  // Inventory fields: type a number, then Enter sets it, + adds, - removes; each jumps to the next field.
+  // Tab / Shift+Tab (or arrows) move without changing anything.
+  const handleInventoryKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    const field = e.currentTarget;
+    const dId = field.dataset.denom;
+    if (!dId) return;
+    const group = field.dataset.invInput;
+    const fields = Array.from(document.querySelectorAll<HTMLInputElement>(`[data-inv-input="${group}"]`));
+    const idx = fields.indexOf(field);
+    const go = (delta: number) => {
+      const next = fields[idx + delta];
+      if (next) next.focus();
+      else if (group === "main") amountInputRef.current?.focus();
+      else fields[(idx + delta + fields.length) % fields.length]?.focus();
+    };
+
+    const commitKeys: Record<string, 'add' | 'sub' | 'set'> = { Enter: 'set', '=': 'set', '+': 'add', '-': 'sub' };
+    const action = commitKeys[e.key];
+    if (action) {
+      e.preventDefault();
+      if (modifiers[dId]) handleModify(dId, action);
+      // Enter on an empty field just moves on, like Tab
+      if (modifiers[dId] || e.key === 'Enter') go(1);
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      go(e.shiftKey ? -1 : 1);
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      go(e.key === 'ArrowDown' ? 1 : -1);
+    }
   };
 
   const handleCalculate = (overrideContainer?: string, autoConfirm?: boolean) => {
@@ -588,6 +623,12 @@ export default function CashDeliveryCalculator() {
     document.querySelector(`[data-container="${CSS.escape(activeHighlight)}"]`)?.scrollIntoView({ block: 'nearest' });
   }, [isContainerModalOpen, activeHighlight]);
 
+  const toggleInventoryUnit = () => {
+    const next = inventoryUnit === 'packs' ? 'pieces' : 'packs';
+    setInventoryUnit(next);
+    flash(next === 'pieces' ? `Inventory in single ${form.looseName} (Scanner count)` : `Inventory in ${form.unitNamePlural}`);
+  };
+
   const anyModalOpen = isContainerModalOpen || !!pendingConfirmation || isSettingsModalOpen
     || isFullInventoryModalOpen || isCustomDataModalOpen || isHelpModalOpen;
 
@@ -616,12 +657,24 @@ export default function CashDeliveryCalculator() {
         }
         return;
       }
-      if (anyModalOpen || e.ctrlKey || e.metaKey || e.altKey) return;
+      // Keys a field already acted on (e.g. + / - / Enter in inventory fields) are not shortcuts
+      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
 
       const target = e.target as HTMLElement;
       const isTextField = target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement
         || (target instanceof HTMLInputElement && !['checkbox', 'radio', 'button'].includes(target.type));
-      if (isTextField && target !== amountInputRef.current) return;
+      // The amount and inventory fields only take digits, ".", k and m, so letters there are shortcuts too
+      const isCommandField = target.dataset?.commandField !== undefined;
+      if (isTextField && !isCommandField) return;
+
+      if (anyModalOpen) {
+        // Switching the counting unit stays available inside the full inventory
+        if (isFullInventoryModalOpen && e.key.toLowerCase() === 't') {
+          toggleInventoryUnit();
+          e.preventDefault();
+        }
+        return;
+      }
       if (!isTextField && /^[0-9.]$/.test(e.key)) {
         // Start typing an amount from anywhere
         amountInputRef.current?.focus();
@@ -659,9 +712,7 @@ export default function CashDeliveryCalculator() {
         setTargetDenom(next);
         flash(next === "" ? "Mixed denominations" : `Only ${activeDenoms.find(d => String(d.value) === next)?.label}`);
       } else if (key === 't') {
-        const next = inventoryUnit === 'packs' ? 'pieces' : 'packs';
-        setInventoryUnit(next);
-        flash(next === 'pieces' ? `Inventory in single ${form.looseName} (Scanner count)` : `Inventory in ${form.unitNamePlural}`);
+        toggleInventoryUnit();
       } else if (key === 'o') {
         openContainerPicker();
       } else if (key === 'r') {
@@ -680,6 +731,12 @@ export default function CashDeliveryCalculator() {
         return;
       }
       e.preventDefault();
+      // Switching currency or bills/coins replaces the inventory fields; keep the cursor in the new ones
+      if (target.dataset.invInput === 'main') {
+        setTimeout(() => {
+          if (!target.isConnected) document.querySelector<HTMLElement>('[data-inv-input="main"]')?.focus();
+        }, 0);
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
@@ -762,6 +819,7 @@ export default function CashDeliveryCalculator() {
                   <input
                     type="text"
                     ref={amountInputRef}
+                    data-command-field
                     autoFocus
                     inputMode={amountScale > 1 ? "decimal" : "numeric"}
                     value={amount}
@@ -910,12 +968,15 @@ export default function CashDeliveryCalculator() {
               </button>
               </div>
             </div>
+            <p className="hidden md:flex flex-wrap items-center gap-1 -mt-2 mb-4 text-xs text-gray-500">
+              Type a number, then <Key k="Enter" /> set <span className="mx-1">&middot;</span> <Key k="+" /> add <span className="mx-1">&middot;</span> <Key k="-" /> remove <span className="mx-1">&middot;</span> <Key k="Tab" /> skip <span className="mx-1">&middot;</span> <Key k="Esc" /> done
+            </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 flex-grow">
               {activeDenoms.length === 0 && (
                 <div className="md:col-span-2 text-center text-gray-500 py-12">{activeCurrency.name} has no coins. Switch to bills or pick another currency.</div>
               )}
               {activeDenoms.map(d => (
-                <div key={d.id} className="bg-gray-900 p-4 rounded-xl border border-gray-700 shadow-inner flex flex-col justify-between space-y-4">
+                <div key={d.id} className="bg-gray-900 p-4 rounded-xl border border-gray-700 shadow-inner flex flex-col justify-between space-y-4 transition-colors focus-within:border-amber-400 focus-within:ring-1 focus-within:ring-amber-400/50">
                   <div className="flex flex-wrap justify-between items-start gap-2">
                     <div className="flex items-center gap-3">
                       <DenomImage d={d} kind={moneyKind} size="md" />
@@ -936,22 +997,18 @@ export default function CashDeliveryCalculator() {
                       type="text" 
                       inputMode="numeric"
                       data-inv-input="main"
-                      title={`In ${inventoryUnit === "packs" ? "packs/rolls" : "single bills/coins"}: 5 or +5 adds, -5 subtracts, =5 sets`}
+                      title={`Type ${inventoryUnit === "packs" ? "packs/rolls" : "single bills/coins"}, then Enter sets, + adds, - removes. Tab skips.`}
                       value={modifiers[d.id] || ""}
-                      onChange={e => setModifiers({ ...modifiers, [d.id]: parseModifier(e.target.value) })}
-                      onKeyDown={e => {
-                        if (e.key === 'Enter') handleModify(d.id);
-                        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-                          e.preventDefault();
-                          moveFocus(e.currentTarget, `[data-inv-input="${e.currentTarget.dataset.invInput}"]`, e.key === 'ArrowDown' ? 1 : -1);
-                        }
-                      }}
+                      onChange={e => setModifiers({ ...modifiers, [d.id]: parseShorthand(e.target.value, false) })}
+                      data-denom={d.id}
+                      data-command-field
+                      onKeyDown={handleInventoryKey}
                       className="w-20 bg-gray-950 border border-gray-600 rounded px-2 py-1.5 text-white text-center font-mono focus:border-blue-500 focus:outline-none placeholder-gray-600" 
                       placeholder="0"
                     />
-                    <button onClick={() => handleModify(d.id, 'add')} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-1.5 rounded font-bold transition-colors" title="Add to inventory">+</button>
-                    <button onClick={() => handleModify(d.id, 'sub')} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-1.5 rounded font-bold transition-colors" title="Subtract from inventory">-</button>
-                    <button onClick={() => handleModify(d.id, 'set')} className="flex-1 bg-blue-600/80 hover:bg-blue-500 text-white py-1.5 rounded font-bold transition-colors" title="Set exact amount">Set</button>
+                    <button onClick={() => handleModify(d.id, 'add')} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-1.5 rounded font-bold transition-colors" tabIndex={-1} title="Add to inventory">+</button>
+                    <button onClick={() => handleModify(d.id, 'sub')} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-1.5 rounded font-bold transition-colors" tabIndex={-1} title="Subtract from inventory">-</button>
+                    <button onClick={() => handleModify(d.id, 'set')} className="flex-1 bg-blue-600/80 hover:bg-blue-500 text-white py-1.5 rounded font-bold transition-colors" tabIndex={-1} title="Set exact amount">Set</button>
                   </div>
                 </div>
               ))}
@@ -1309,8 +1366,13 @@ export default function CashDeliveryCalculator() {
             </div>
             <div className="p-6 overflow-y-auto flex-grow bg-gray-800 rounded-b-xl space-y-8 custom-scrollbar">
               
-              <div className="flex justify-between items-center pb-2 border-b border-gray-700">
+              <div className="flex justify-between items-center gap-4 pb-2 border-b border-gray-700">
+                <div>
                 <p className="text-gray-400 text-sm">Manage all your bills and coins across every currency. Counting in {inventoryUnit === "packs" ? "packs / rolls" : "single bills / coins"} (switch with T).</p>
+                <p className="hidden md:flex flex-wrap items-center gap-1 mt-2 text-xs text-gray-500">
+                  Type a number, then <Key k="Enter" /> set <span className="mx-1">&middot;</span> <Key k="+" /> add <span className="mx-1">&middot;</span> <Key k="-" /> remove <span className="mx-1">&middot;</span> <Key k="Tab" /> skip <span className="mx-1">&middot;</span> <Key k="T" /> unit <span className="mx-1">&middot;</span> <Key k="Esc" /> close
+                </p>
+                </div>
                 <button 
                   onClick={() => {
                     if (window.confirm("Are you sure you want to clear ALL inventory? This cannot be undone.")) {
@@ -1335,7 +1397,7 @@ export default function CashDeliveryCalculator() {
                   </h4>
                   <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                     {denoms.map(d => (
-                      <div key={d.id} className="bg-gray-900 p-3 rounded-xl border border-gray-700 shadow-inner flex flex-col justify-between space-y-3">
+                      <div key={d.id} className="bg-gray-900 p-3 rounded-xl border border-gray-700 shadow-inner flex flex-col justify-between space-y-3 transition-colors focus-within:border-amber-400 focus-within:ring-1 focus-within:ring-amber-400/50">
                         <div className="flex flex-wrap justify-between items-center gap-2">
                           <span className="flex items-center gap-2">
                             <DenomImage d={d} kind={kind} size="sm" />
@@ -1348,22 +1410,20 @@ export default function CashDeliveryCalculator() {
                             type="text" 
                             inputMode="numeric"
                             data-inv-input="full"
-                            title={`In ${inventoryUnit === "packs" ? "packs/rolls" : "single bills/coins"}: 5 or +5 adds, -5 subtracts, =5 sets`}
+                            // Open with the cursor on the currency and money kind you are working with
+                            autoFocus={d.id === activeDenoms[0]?.id}
+                            title={`Type ${inventoryUnit === "packs" ? "packs/rolls" : "single bills/coins"}, then Enter sets, + adds, - removes. Tab skips.`}
                             value={modifiers[d.id] || ""}
-                            onChange={e => setModifiers({ ...modifiers, [d.id]: parseModifier(e.target.value) })}
-                            onKeyDown={e => {
-                              if (e.key === 'Enter') handleModify(d.id);
-                              if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-                                e.preventDefault();
-                                moveFocus(e.currentTarget, `[data-inv-input="${e.currentTarget.dataset.invInput}"]`, e.key === 'ArrowDown' ? 1 : -1);
-                              }
-                            }}
+                            onChange={e => setModifiers({ ...modifiers, [d.id]: parseShorthand(e.target.value, false) })}
+                            data-denom={d.id}
+                            data-command-field
+                            onKeyDown={handleInventoryKey}
                             className="w-16 bg-gray-950 border border-gray-600 rounded px-2 py-1 text-white text-center font-mono focus:border-blue-500 focus:outline-none placeholder-gray-600 text-sm" 
                             placeholder="0"
                           />
-                          <button onClick={() => handleModify(d.id, 'add')} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-1 rounded font-bold transition-colors text-sm" title="Add">+</button>
-                          <button onClick={() => handleModify(d.id, 'sub')} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-1 rounded font-bold transition-colors text-sm" title="Subtract">-</button>
-                          <button onClick={() => handleModify(d.id, 'set')} className="flex-1 bg-blue-600/80 hover:bg-blue-500 text-white py-1 rounded font-bold transition-colors text-sm" title="Set exact">Set</button>
+                          <button onClick={() => handleModify(d.id, 'add')} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-1 rounded font-bold transition-colors text-sm" tabIndex={-1} title="Add">+</button>
+                          <button onClick={() => handleModify(d.id, 'sub')} className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-1 rounded font-bold transition-colors text-sm" tabIndex={-1} title="Subtract">-</button>
+                          <button onClick={() => handleModify(d.id, 'set')} className="flex-1 bg-blue-600/80 hover:bg-blue-500 text-white py-1 rounded font-bold transition-colors text-sm" tabIndex={-1} title="Set exact">Set</button>
                         </div>
                       </div>
                     ))}
