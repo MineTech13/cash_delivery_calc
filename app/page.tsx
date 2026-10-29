@@ -16,21 +16,79 @@ type ResultRow = {
   looseStr?: string;
 };
 
-// Expands k/m shorthand (15k -> 15000, 1.5m -> 1500000) and strips anything that isn't a number
+// Expands k/m shorthand (15k -> 15000, 1.5m -> 1500000) and strips anything that isn't a number.
+// Integer fields still accept a "." while typing so that 1.5k works.
 const parseShorthand = (raw: string, allowDecimal: boolean) => {
-  let val = raw.toLowerCase().replace(allowDecimal ? /[^0-9.km]/g : /[^0-9km]/g, '');
+  let val = raw.toLowerCase().replace(/[^0-9.km]/g, '');
   const match = val.match(/^(\d*\.?\d*)([km])$/);
   if (match) {
     const n = parseFloat(match[1] || "0") * (match[2] === 'k' ? 1000 : 1000000);
-    return Number.isFinite(n) ? String(Math.round(n * 100) / 100) : '';
+    if (!Number.isFinite(n)) return '';
+    return String(allowDecimal ? Math.round(n * 100) / 100 : Math.round(n));
   }
   val = val.replace(/[km]/g, '');
-  if (allowDecimal) {
-    const [whole, ...rest] = val.split('.');
-    val = rest.length > 0 ? `${whole}.${rest.join('').slice(0, 2)}` : whole;
-  }
-  return val;
+  const [whole, ...rest] = val.split('.');
+  return rest.length > 0 ? `${whole}.${rest.join('').slice(0, allowDecimal ? 2 : 1)}` : whole;
 };
+
+// Inventory fields accept "5" or "+5" (add), "-5" (subtract) and "=5" (set)
+const parseModifier = (raw: string) => {
+  const sign = raw.trim().match(/^[+\-=]/)?.[0] ?? '';
+  return sign + parseShorthand(raw.replace(/^\s*[+\-=]/, ''), false);
+};
+
+const moveFocus = (current: HTMLElement, selector: string, delta: number) => {
+  const list = Array.from(document.querySelectorAll<HTMLElement>(selector));
+  list[list.indexOf(current) + delta]?.focus();
+};
+
+const Key = ({ k, className = "" }: { k: string; className?: string }) => (
+  <kbd className={`hidden md:inline-flex items-center justify-center min-w-5 h-5 px-1 rounded border border-gray-500 bg-gray-700/80 text-[10px] font-mono font-bold text-gray-200 shadow-[0_1px_0_rgba(107,114,128,1)] leading-none ${className}`}>{k}</kbd>
+);
+
+const SHORTCUT_GROUPS: { title: string; items: [string[], string][] }[] = [
+  {
+    title: "Workflow",
+    items: [
+      [["Enter"], "Amount → container picker → confirm the best packing"],
+      [["↑", "↓"], "Move through containers, results and inventory fields"],
+      [["Esc"], "Close any window and jump back to the amount field"],
+      [["Esc", "Esc"], "Clear the amount and results for a new job"],
+      [["R"], "Jump to the calculated results"],
+    ],
+  },
+  {
+    title: "Job",
+    items: [
+      [["B", "C"], "Deliver bills / coins"],
+      [["U", "E", "Y", "P"], "USD / EUR / JPY / GBP"],
+      [["[", "]"], "Previous / next currency (includes custom ones)"],
+      [["F"], "Toggle only full blocks"],
+      [["S"], "Toggle Smart Balance"],
+      [["X"], "Toggle Emergency Split"],
+      [["D"], "Cycle forced denomination"],
+      [["O"], "Change container"],
+      [["k", "m"], "Thousands / millions in any number field (15k, 1.5m)"],
+    ],
+  },
+  {
+    title: "Inventory",
+    items: [
+      [["I"], "Jump to the inventory fields"],
+      [["5", "+5"], "Then Enter: add packs / rolls"],
+      [["-5"], "Then Enter: subtract"],
+      [["=5"], "Then Enter: set the exact count"],
+      [["A"], "Open the full inventory of every currency"],
+    ],
+  },
+  {
+    title: "Other",
+    items: [
+      [["?", "H"], "This help"],
+      [[","], "Settings"],
+    ],
+  },
+];
 
 const DenomImage = ({ d, kind, size }: { d: Denomination; kind: MoneyKind; size: "sm" | "md" }) => {
   if (!d.image) {
@@ -80,6 +138,8 @@ export default function CashDeliveryCalculator() {
   const [selectedContainer, setSelectedContainer] = useState<string>("Backpack");
   const [isContainerModalOpen, setIsContainerModalOpen] = useState(false);
   const [containerSearch, setContainerSearch] = useState("");
+  const [highlightedContainer, setHighlightedContainer] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ text: string; tone: 'info' | 'error' } | null>(null);
   
   const [results, setResults] = useState<ResultRow[]>([]);
   const [pendingConfirmation, setPendingConfirmation] = useState<ResultRow | null>(null);
@@ -135,20 +195,20 @@ export default function CashDeliveryCalculator() {
     setIsLoaded(true);
   }, []);
 
-  // Global keyboard shortcuts
+  // Each new notice restarts the timer
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setIsContainerModalOpen(false);
-        setPendingConfirmation(null);
-        setIsSettingsModalOpen(false);
-        setIsFullInventoryModalOpen(false);
-        setIsCustomDataModalOpen(false);
-        setIsHelpModalOpen(false);
-      }
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), 2500);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
+  // Coming back from the game (alt-tab) should land straight in the amount field
+  useEffect(() => {
+    const handleWindowFocus = () => {
+      if (document.activeElement === document.body) amountInputRef.current?.focus();
     };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('focus', handleWindowFocus);
+    return () => window.removeEventListener('focus', handleWindowFocus);
   }, []);
 
   // Save to cookies when inventory changes (if consent granted)
@@ -203,7 +263,9 @@ export default function CashDeliveryCalculator() {
   const activeDenoms = (moneyKind === "coins" ? activeCurrency.coins : activeCurrency.denominations) ?? [];
   // Coin jobs are calculated in minor units (cents) so fractional amounts stay exact
   const amountScale = moneyKind === "coins" ? (activeCurrency.coinScale ?? 1) : 1;
-  const parsedAmount = Math.round((parseFloat(amount) || 0) * amountScale);
+  const parsedAmount = amountScale === 1
+    ? Math.floor(parseFloat(amount) || 0)
+    : Math.round((parseFloat(amount) || 0) * amountScale);
   const unitLabel = form.unitNamePlural.charAt(0).toUpperCase() + form.unitNamePlural.slice(1);
 
   const switchMoneyKind = (kind: MoneyKind) => {
@@ -212,6 +274,26 @@ export default function CashDeliveryCalculator() {
     setResults([]);
     const scale = kind === "coins" ? (activeCurrency.coinScale ?? 1) : 1;
     if (scale === 1) setAmount(prev => prev.split('.')[0]);
+  };
+
+  const selectCurrency = (c: string) => {
+    setCurrencyName(c);
+    setResults([]);
+    setTargetDenom("");
+    if (moneyKind === 'coins' && (allCurrencies[c].coinScale ?? 1) === 1) setAmount(prev => prev.split('.')[0]);
+  };
+
+  const focusAmount = () => {
+    // Wait for any closing modal to unmount before moving focus
+    setTimeout(() => amountInputRef.current?.focus(), 0);
+  };
+
+  const flash = (text: string, tone: 'info' | 'error' = 'info') => setNotice({ text, tone });
+
+  const openContainerPicker = () => {
+    setContainerSearch("");
+    setHighlightedContainer(selectedContainer);
+    setIsContainerModalOpen(true);
   };
 
   const allContainers = [...CONTAINERS];
@@ -230,9 +312,11 @@ export default function CashDeliveryCalculator() {
   const selectedContainerItem = allContainers.flatMap(c => c.items).find(i => i.name === selectedContainer);
 
 
-  const handleModify = (dId: string, action: 'add' | 'sub' | 'set') => {
-    const val = parseInt(modifiers[dId] || "0", 10) || 0;
-    if (isNaN(val)) return;
+  const handleModify = (dId: string, action?: 'add' | 'sub' | 'set') => {
+    const raw = modifiers[dId] || "";
+    const val = parseInt(raw.replace(/^[+\-=]/, ''), 10) || 0;
+    // Without an explicit button, the typed prefix decides: -5 subtracts, =5 sets, anything else adds
+    action = action ?? (raw.startsWith('-') ? 'sub' : raw.startsWith('=') ? 'set' : 'add');
 
     setInventory(prev => {
       const current = parseInt(prev[dId] || "0", 10) || 0;
@@ -249,7 +333,8 @@ export default function CashDeliveryCalculator() {
   const handleCalculate = (overrideContainer?: string, autoConfirm?: boolean) => {
     const desiredAmount = parsedAmount;
     if (desiredAmount <= 0) {
-      if (!autoConfirm) alert("Please enter a valid amount");
+      flash("Enter a job amount first", 'error');
+      focusAmount();
       return;
     }
 
@@ -279,7 +364,8 @@ export default function CashDeliveryCalculator() {
 
     if (denomsToUse.length === 0) {
       setResults([]);
-      alert("No valid combinations found with current inventory.");
+      flash(`No ${activeCurrency.name} ${form.looseName} in stock that fit this amount`, 'error');
+      focusAmount();
       return;
     }
 
@@ -401,7 +487,8 @@ export default function CashDeliveryCalculator() {
     if (autoConfirm && finalResults.length > 0) {
       setPendingConfirmation(finalResults[0]);
     } else if (finalResults.length === 0) {
-      alert("No valid combinations found. Check your inventory or denomination settings.");
+      flash("No valid combinations found. Check your inventory or options.", 'error');
+      focusAmount();
     }
   };
 
@@ -430,8 +517,133 @@ export default function CashDeliveryCalculator() {
     }, 0);
   };
 
+  const filteredContainerCategories = allContainers.map(c => ({
+    ...c,
+    items: c.items.filter(i => containerMatches(i, containerSearch))
+  })).filter(c => c.items.length > 0);
+  const pickableContainers = filteredContainerCategories.flatMap(c => c.items).filter(i => !(i.coinsOnly && moneyKind === 'bills'));
+  const activeHighlight = pickableContainers.some(i => i.name === highlightedContainer)
+    ? highlightedContainer
+    : pickableContainers[0]?.name ?? null;
+
+  const pickContainer = (name: string) => {
+    setSelectedContainer(name);
+    setIsContainerModalOpen(false);
+    setTimeout(() => handleCalculate(name, autoConfirmBest), 0);
+  };
+
+  const handleContainerClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const name = e.currentTarget.dataset.container;
+    if (name) pickContainer(name);
+  };
+
+  useEffect(() => {
+    if (!isContainerModalOpen || !activeHighlight) return;
+    document.querySelector(`[data-container="${CSS.escape(activeHighlight)}"]`)?.scrollIntoView({ block: 'nearest' });
+  }, [isContainerModalOpen, activeHighlight]);
+
+  const anyModalOpen = isContainerModalOpen || !!pendingConfirmation || isSettingsModalOpen
+    || isFullInventoryModalOpen || isCustomDataModalOpen || isHelpModalOpen;
+
+  // Global keyboard shortcuts. Letters also work inside the amount field, since amounts only use digits, ".", k and m.
+  // Re-subscribed on every render so the handler always sees the current state.
+  useEffect(() => {
+    const onOff = (on: boolean) => (on ? "on" : "off");
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (anyModalOpen) {
+          setIsContainerModalOpen(false);
+          setPendingConfirmation(null);
+          setIsSettingsModalOpen(false);
+          setIsFullInventoryModalOpen(false);
+          setIsCustomDataModalOpen(false);
+          setIsHelpModalOpen(false);
+        } else if (document.activeElement === amountInputRef.current) {
+          // Second Esc in the amount field starts a fresh job
+          setAmount("");
+          setResults([]);
+        }
+        focusAmount();
+        return;
+      }
+      if (anyModalOpen || e.ctrlKey || e.metaKey || e.altKey) return;
+
+      const target = e.target as HTMLElement;
+      const isTextField = target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement
+        || (target instanceof HTMLInputElement && !['checkbox', 'radio', 'button'].includes(target.type));
+      if (isTextField && target !== amountInputRef.current) return;
+      if (!isTextField && /^[0-9.]$/.test(e.key)) {
+        // Start typing an amount from anywhere
+        amountInputRef.current?.focus();
+        return;
+      }
+
+      const currencyKeys: Record<string, string> = { u: "USD", e: "EUR", y: "JPY", p: "GBP" };
+      const key = e.key.toLowerCase();
+      if (key in currencyKeys && allCurrencies[currencyKeys[key]]) {
+        selectCurrency(currencyKeys[key]);
+        flash(`Currency: ${currencyKeys[key]}`);
+      } else if (key === '[' || key === ']') {
+        const names = Object.keys(allCurrencies);
+        const next = names[(names.indexOf(currencyName) + (key === ']' ? 1 : -1) + names.length) % names.length];
+        selectCurrency(next);
+        flash(`Currency: ${next}`);
+      } else if (key === 'b') {
+        switchMoneyKind('bills');
+        flash("Delivering bills");
+      } else if (key === 'c') {
+        switchMoneyKind('coins');
+        flash(activeCurrency.coins?.length ? "Delivering coins" : `${activeCurrency.name} has no coins`, activeCurrency.coins?.length ? 'info' : 'error');
+      } else if (key === 'f') {
+        setFullBlocksOnly(!fullBlocksOnly);
+        flash(`Full blocks only: ${onOff(!fullBlocksOnly)}`);
+      } else if (key === 's') {
+        setBalancedMode(!balancedMode);
+        flash(`Smart Balance: ${onOff(!balancedMode)}`);
+      } else if (key === 'x') {
+        setEmergencySplit(!emergencySplit);
+        flash(`Emergency Split: ${onOff(!emergencySplit)}`);
+      } else if (key === 'd') {
+        const options = ["", ...activeDenoms.map(d => String(d.value))];
+        const next = options[(options.indexOf(targetDenom) + 1) % options.length];
+        setTargetDenom(next);
+        flash(next === "" ? "Mixed denominations" : `Only ${activeDenoms.find(d => String(d.value) === next)?.label}`);
+      } else if (key === 'o') {
+        openContainerPicker();
+      } else if (key === 'r') {
+        const first = document.querySelector<HTMLElement>('[data-result-btn]');
+        if (first) first.focus();
+        else flash("No results yet", 'error');
+      } else if (key === 'i') {
+        document.querySelector<HTMLElement>('[data-inv-input="main"]')?.focus();
+      } else if (key === 'a') {
+        setIsFullInventoryModalOpen(true);
+      } else if (key === '?' || key === '/' || key === 'h') {
+        setIsHelpModalOpen(true);
+      } else if (key === ',') {
+        setIsSettingsModalOpen(true);
+      } else {
+        return;
+      }
+      e.preventDefault();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  });
+
   return (
     <div className="bg-gray-900 text-gray-100 min-h-screen font-sans p-4 md:p-8 selection:bg-blue-500/30 pb-24">
+      {notice && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`fixed top-4 left-1/2 -translate-x-1/2 z-[60] px-4 py-2 rounded-lg shadow-2xl border text-sm font-semibold animate-in fade-in duration-150 ${
+            notice.tone === 'error' ? 'bg-red-950/95 border-red-500/60 text-red-200' : 'bg-gray-950/95 border-blue-500/60 text-blue-100'
+          }`}
+        >
+          {notice.text}
+        </div>
+      )}
       <div className="max-w-6xl mx-auto space-y-6">
         
         {/* Header */}
@@ -444,14 +656,14 @@ export default function CashDeliveryCalculator() {
             <button 
               onClick={() => setIsHelpModalOpen(true)}
               className="p-2 bg-gray-800 hover:bg-gray-700 rounded-lg border border-gray-600 transition-colors text-blue-400 flex-shrink-0"
-              title="Help & Shortcuts"
+              title="Help & Shortcuts (?)"
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
             </button>
             <button 
               onClick={() => setIsSettingsModalOpen(true)}
               className="p-2 bg-gray-800 hover:bg-gray-700 rounded-lg border border-gray-600 transition-colors text-gray-300 flex-shrink-0"
-              title="Settings & Flow Rules"
+              title="Settings & Flow Rules (,)"
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -485,6 +697,7 @@ export default function CashDeliveryCalculator() {
                       >
                         <Image src={MONEY_FORMS[kind].image} alt="" width={28} height={28} className="object-contain" style={{ width: 28, height: 28 }} />
                         {kind === 'bills' ? 'Bills' : 'Coins'}
+                        <Key k={kind === 'bills' ? 'B' : 'C'} />
                       </button>
                     ))}
                   </div>
@@ -503,40 +716,42 @@ export default function CashDeliveryCalculator() {
                       if (e.key === 'Enter') {
                         if (parsedAmount > 0) {
                           if (autoOpenContainer) {
-                            setContainerSearch("");
-                            setIsContainerModalOpen(true);
+                            openContainerPicker();
                           } else {
                             handleCalculate();
                           }
                         } else {
-                          alert("Please enter a valid amount first.");
+                          flash("Enter a job amount first", 'error');
                         }
                       }
                     }}
                     className="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder-gray-500" 
                     placeholder={moneyKind === 'coins' ? (amountScale > 1 ? "e.g. 42.50" : "e.g. 12000") : "e.g. 500000"}
                   />
+                  <p className="hidden md:flex flex-wrap items-center gap-1 mt-2 text-xs text-gray-500">
+                    <Key k="Enter" /> pick container <span className="mx-1">&middot;</span> <Key k="Esc" /> <Key k="Esc" /> new job <span className="mx-1">&middot;</span> <Key k="?" /> all shortcuts
+                  </p>
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-400 mb-2">Currency</label>
+                  <label className="flex items-center gap-1.5 text-sm font-medium text-gray-400 mb-2">Currency <span className="hidden md:inline text-xs text-gray-500">(<Key k="[" /> <Key k="]" /> to cycle)</span></label>
                   <div className="flex flex-wrap gap-2">
                     {Object.keys(allCurrencies).map(c => (
                       <button 
                         key={c}
-                        onClick={() => {
-                          setCurrencyName(c);
-                          setResults([]);
-                          setTargetDenom("");
-                          if (moneyKind === 'coins' && (allCurrencies[c].coinScale ?? 1) === 1) setAmount(prev => prev.split('.')[0]);
-                        }}
+                        onClick={() => selectCurrency(c)}
                         className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors border ${
                           c === currencyName 
                             ? 'bg-blue-500 border-blue-500 text-white' 
                             : 'bg-gray-800 border-gray-600 text-gray-400 hover:text-white'
                         }`}
                       >
-                        {c}
+                        <span className="flex items-center gap-1.5">
+                          {c}
+                          {({ USD: "U", EUR: "E", JPY: "Y", GBP: "P" } as Record<string, string>)[c] && (
+                            <Key k={({ USD: "U", EUR: "E", JPY: "Y", GBP: "P" } as Record<string, string>)[c]} />
+                          )}
+                        </span>
                       </button>
                     ))}
                   </div>
@@ -551,6 +766,7 @@ export default function CashDeliveryCalculator() {
                       className="form-checkbox h-5 w-5 text-blue-500 rounded border-gray-600 bg-gray-900 focus:ring-blue-500 focus:ring-offset-gray-800"
                     />
                     <span className="text-sm text-gray-300 group-hover:text-white transition-colors">Only allow full blocks ({form.blockSize} {form.unitNamePlural})</span>
+                    <Key k="F" className="ml-auto" />
                   </label>
                   <label className="flex items-center space-x-3 cursor-pointer group">
                     <input 
@@ -560,6 +776,7 @@ export default function CashDeliveryCalculator() {
                       className="form-checkbox h-5 w-5 text-green-500 rounded border-gray-600 bg-gray-900 focus:ring-green-500 focus:ring-offset-gray-800"
                     />
                     <span className="text-sm text-green-500 font-medium group-hover:text-green-400 transition-colors">Smart Balance (Prioritize abundant)</span>
+                    <Key k="S" className="ml-auto" />
                   </label>
                   <div className="flex items-center space-x-3 group">
                     <select 
@@ -573,6 +790,7 @@ export default function CashDeliveryCalculator() {
                       ))}
                     </select>
                     <span className="text-sm text-purple-400 font-medium group-hover:text-purple-300 transition-colors">Force specific {form.looseName}</span>
+                    <Key k="D" className="ml-auto" />
                   </div>
                   <label className="flex items-center space-x-3 cursor-pointer group pt-1">
                     <input 
@@ -582,6 +800,7 @@ export default function CashDeliveryCalculator() {
                       className="form-checkbox h-5 w-5 text-yellow-500 rounded border-gray-600 bg-gray-900 focus:ring-yellow-500 focus:ring-offset-gray-800"
                     />
                     <span className="text-sm text-yellow-500 font-medium group-hover:text-yellow-400 transition-colors">Emergency Split (Break {form.unitNamePlural} for exact change)</span>
+                    <Key k="X" className="ml-auto" />
                   </label>
                 </div>
               </div>
@@ -590,10 +809,7 @@ export default function CashDeliveryCalculator() {
             <div className="bg-gray-800 rounded-xl p-6 shadow-lg border border-gray-700">
               <h2 className="text-lg font-semibold mb-4 text-white">Container Selection</h2>
               <button 
-                onClick={() => {
-                  setContainerSearch("");
-                  setIsContainerModalOpen(true);
-                }}
+                onClick={openContainerPicker}
                 className="w-full flex items-center justify-between bg-gray-900 border border-gray-600 hover:border-blue-500 rounded-lg px-4 py-3 text-white transition-colors group"
               >
                 <div className="flex items-center gap-3 min-w-0">
@@ -605,7 +821,7 @@ export default function CashDeliveryCalculator() {
                     <span className="text-sm text-gray-400">Capacity: {getCapacity(selectedContainer)} &middot; {Math.floor(getCapacity(selectedContainer) / form.unitVolume)} {form.unitNamePlural}</span>
                   </div>
                 </div>
-                <span className="text-blue-500 font-semibold group-hover:text-blue-400 transition-colors">Change</span>
+                <span className="flex items-center gap-2 text-blue-500 font-semibold group-hover:text-blue-400 transition-colors">Change <Key k="O" /></span>
               </button>
             </div>
           </div>
@@ -613,13 +829,14 @@ export default function CashDeliveryCalculator() {
           {/* Right Column: Denominations */}
           <div className="lg:col-span-2 bg-gray-800 rounded-xl p-6 shadow-lg border border-gray-700 flex flex-col">
             <div className="flex justify-between items-center mb-4">
-              <h2 className="text-lg font-semibold text-white">Inventory Management</h2>
+              <h2 className="text-lg font-semibold text-white flex items-center gap-2">Inventory Management <Key k="I" /></h2>
               <button 
                 onClick={() => setIsFullInventoryModalOpen(true)}
                 className="text-sm text-blue-400 hover:text-blue-300 transition-colors flex items-center"
               >
                 <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" /></svg>
                 Full Inventory
+                <Key k="A" className="ml-2" />
               </button>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 flex-grow">
@@ -648,10 +865,16 @@ export default function CashDeliveryCalculator() {
                     <input 
                       type="text" 
                       inputMode="numeric"
+                      data-inv-input="main"
+                      title="5 or +5 adds, -5 subtracts, =5 sets"
                       value={modifiers[d.id] || ""}
-                      onChange={e => setModifiers({ ...modifiers, [d.id]: parseShorthand(e.target.value, false) })}
+                      onChange={e => setModifiers({ ...modifiers, [d.id]: parseModifier(e.target.value) })}
                       onKeyDown={e => {
-                        if (e.key === 'Enter') handleModify(d.id, 'add');
+                        if (e.key === 'Enter') handleModify(d.id);
+                        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                          e.preventDefault();
+                          moveFocus(e.currentTarget, `[data-inv-input="${e.currentTarget.dataset.invInput}"]`, e.key === 'ArrowDown' ? 1 : -1);
+                        }
                       }}
                       className="w-20 bg-gray-950 border border-gray-600 rounded px-2 py-1.5 text-white text-center font-mono focus:border-blue-500 focus:outline-none placeholder-gray-600" 
                       placeholder="0"
@@ -678,7 +901,7 @@ export default function CashDeliveryCalculator() {
         {/* Results Section */}
         <div className="bg-gray-800 rounded-xl shadow-lg border border-gray-700 overflow-hidden">
           <div className="p-6 border-b border-gray-700 flex justify-between items-center bg-gray-800/50">
-            <h2 className="text-lg font-semibold text-white">Calculated Configurations</h2>
+            <h2 className="text-lg font-semibold text-white flex items-center gap-2">Calculated Configurations <Key k="R" /></h2>
             <span className="text-xs text-gray-400">*VB = Very Balanced, *GB = Good Balance</span>
           </div>
           
@@ -730,8 +953,15 @@ export default function CashDeliveryCalculator() {
                       <td className="p-4 text-center">
                         <button 
                           autoFocus={i === 0}
+                          data-result-btn
                           onClick={() => setPendingConfirmation(r)}
-                          className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-1.5 rounded text-sm font-semibold transition-colors"
+                          onKeyDown={e => {
+                            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                              e.preventDefault();
+                              moveFocus(e.currentTarget, '[data-result-btn]', e.key === 'ArrowDown' ? 1 : -1);
+                            }
+                          }}
+                          className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-1.5 rounded text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-amber-400 focus:ring-offset-2 focus:ring-offset-gray-800"
                         >
                           Use {unitLabel}
                         </button>
@@ -768,54 +998,49 @@ export default function CashDeliveryCalculator() {
                 <input
                   autoFocus
                   type="text"
-                  className="block w-full pl-10 pr-3 py-3 border border-gray-700 rounded-lg leading-5 bg-gray-900 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 sm:text-sm"
+                  className="block w-full pl-10 pr-3 md:pr-48 py-3 border border-gray-700 rounded-lg leading-5 bg-gray-900 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 sm:text-sm"
                   placeholder="Search containers..."
                   value={containerSearch}
-                  onChange={(e) => setContainerSearch(e.target.value)}
+                  onChange={(e) => {
+                    setContainerSearch(e.target.value);
+                    setHighlightedContainer(null);
+                  }}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      let matchedContainer = selectedContainer;
-                      if (containerSearch) {
-                        const filtered = allContainers.flatMap(c => c.items).filter(i => containerMatches(i, containerSearch) && !(i.coinsOnly && moneyKind === 'bills'));
-                        if (filtered.length > 0) matchedContainer = filtered[0].name;
-                        else return; // Do nothing if search typed but no match
-                      }
-                      setSelectedContainer(matchedContainer);
-                      setIsContainerModalOpen(false);
-                      setTimeout(() => handleCalculate(matchedContainer, autoConfirmBest), 0);
+                    if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && pickableContainers.length > 0) {
+                      e.preventDefault();
+                      const idx = pickableContainers.findIndex(i => i.name === activeHighlight);
+                      const step = e.key === 'ArrowDown' ? 1 : -1;
+                      setHighlightedContainer(pickableContainers[(idx + step + pickableContainers.length) % pickableContainers.length].name);
                     }
+                    if (e.key === 'Enter' && activeHighlight) pickContainer(activeHighlight);
                   }}
                 />
+                <div className="hidden md:flex absolute inset-y-0 right-3 items-center gap-1 text-xs text-gray-500 pointer-events-none">
+                  <Key k="↑" /><Key k="↓" /> move <Key k="Enter" className="ml-2" /> pick
+                </div>
               </div>
 
-              {(() => {
-                const filteredCategories = allContainers.map(c => ({
-                  ...c,
-                  items: c.items.filter(i => containerMatches(i, containerSearch))
-                })).filter(c => c.items.length > 0);
-
-                if (filteredCategories.length === 0) {
-                  return <div className="text-center text-gray-500 py-12">No containers match your search.</div>;
-                }
-
-                return filteredCategories.map(category => (
+              {filteredContainerCategories.length === 0 ? (
+                <div className="text-center text-gray-500 py-12">No containers match your search.</div>
+              ) : filteredContainerCategories.map(category => (
                   <div key={category.name}>
                     <h3 className="text-lg font-bold text-gray-300 mb-3 border-b border-gray-700 pb-1">{category.name}</h3>
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
                       {category.items.map(item => {
                         const isSelected = item.name === selectedContainer;
                         const isUnusable = !!item.coinsOnly && moneyKind === 'bills';
+                        const isHighlighted = item.name === activeHighlight;
                         return (
                           <button 
                             key={item.name}
+                            data-container={item.name}
                             disabled={isUnusable}
                             title={isUnusable ? "Only holds coins" : undefined}
-                            onClick={() => {
-                              setSelectedContainer(item.name);
-                              setIsContainerModalOpen(false);
-                              setTimeout(() => handleCalculate(item.name, autoConfirmBest), 0);
-                            }}
+                            onClick={handleContainerClick}
+                            onMouseEnter={() => setHighlightedContainer(item.name)}
                             className={`relative flex flex-col text-left p-3 rounded-xl border-2 transition-all ${
+                              isHighlighted ? 'ring-2 ring-amber-400 ring-offset-2 ring-offset-gray-800 ' : ''
+                            }${
                               isUnusable
                                 ? 'bg-gray-900 border-gray-800 opacity-40 cursor-not-allowed'
                                 : isSelected 
@@ -846,8 +1071,7 @@ export default function CashDeliveryCalculator() {
                       })}
                     </div>
                   </div>
-                ));
-              })()}
+                ))}
             </div>
           </div>
         </div>
@@ -901,16 +1125,16 @@ export default function CashDeliveryCalculator() {
             <div className="p-6 bg-gray-900 border-t border-gray-700 flex justify-end space-x-4 rounded-b-xl">
               <button 
                 onClick={() => setPendingConfirmation(null)} 
-                className="px-6 py-2 rounded-lg bg-red-500 hover:bg-red-600 text-white font-bold transition-colors"
+                className="inline-flex items-center px-6 py-2 rounded-lg bg-red-500 hover:bg-red-600 text-white font-bold transition-colors"
               >
-                CANCEL
+                CANCEL <Key k="Esc" className="ml-1 bg-red-700/60 border-red-300/50" />
               </button>
               <button 
                 autoFocus
                 onClick={confirmPacking} 
-                className="px-6 py-2 rounded-lg bg-green-500 hover:bg-green-600 text-white font-bold transition-colors"
+                className="inline-flex items-center px-6 py-2 rounded-lg bg-green-500 hover:bg-green-600 text-white font-bold transition-colors"
               >
-                CONFIRM PACKING
+                CONFIRM PACKING <Key k="Enter" className="ml-1 bg-green-700/60 border-green-300/50" />
               </button>
             </div>
           </div>
@@ -1031,10 +1255,16 @@ export default function CashDeliveryCalculator() {
                           <input 
                             type="text" 
                             inputMode="numeric"
+                            data-inv-input="full"
+                            title="5 or +5 adds, -5 subtracts, =5 sets"
                             value={modifiers[d.id] || ""}
-                            onChange={e => setModifiers({ ...modifiers, [d.id]: parseShorthand(e.target.value, false) })}
+                            onChange={e => setModifiers({ ...modifiers, [d.id]: parseModifier(e.target.value) })}
                             onKeyDown={e => {
-                              if (e.key === 'Enter') handleModify(d.id, 'add');
+                              if (e.key === 'Enter') handleModify(d.id);
+                              if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                                e.preventDefault();
+                                moveFocus(e.currentTarget, `[data-inv-input="${e.currentTarget.dataset.invInput}"]`, e.key === 'ArrowDown' ? 1 : -1);
+                              }
                             }}
                             className="w-16 bg-gray-950 border border-gray-600 rounded px-2 py-1 text-white text-center font-mono focus:border-blue-500 focus:outline-none placeholder-gray-600 text-sm" 
                             placeholder="0"
@@ -1191,7 +1421,7 @@ export default function CashDeliveryCalculator() {
       {/* Help Modal */}
       {isHelpModalOpen && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
-          <div className="bg-gray-800 rounded-xl shadow-2xl border border-gray-600 w-full max-w-lg flex flex-col max-h-[90vh]">
+          <div className="bg-gray-800 rounded-xl shadow-2xl border border-gray-600 w-full max-w-2xl flex flex-col max-h-[90vh]">
             <div className="p-5 border-b border-gray-700 flex justify-between items-center bg-gray-900 rounded-t-xl">
               <h2 className="text-xl font-bold text-white flex items-center">
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-2 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
@@ -1208,24 +1438,26 @@ export default function CashDeliveryCalculator() {
               
               <div>
                 <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider border-b border-gray-700 pb-2 mb-3">Keyboard Shortcuts</h3>
-                <ul className="space-y-4">
-                  <li className="flex items-start">
-                    <kbd className="bg-gray-700 border border-gray-500 rounded px-2 py-0.5 text-xs font-mono text-white mr-3 mt-0.5 shadow-[0_2px_0_rgba(107,114,128,1)]">k</kbd>
-                    <span className="text-sm text-gray-300">Type in any amount or inventory field to add thousands (e.g., <span className="text-white font-mono">15k</span> &rarr; <span className="text-white font-mono">15000</span>).</span>
-                  </li>
-                  <li className="flex items-start">
-                    <kbd className="bg-gray-700 border border-gray-500 rounded px-2 py-0.5 text-xs font-mono text-white mr-3 mt-0.5 shadow-[0_2px_0_rgba(107,114,128,1)]">m</kbd>
-                    <span className="text-sm text-gray-300">Type in any amount or inventory field to add millions (e.g., <span className="text-white font-mono">2m</span> &rarr; <span className="text-white font-mono">2000000</span>).</span>
-                  </li>
-                  <li className="flex items-start">
-                    <kbd className="bg-gray-700 border border-gray-500 rounded px-2 py-0.5 text-xs font-mono text-white mr-3 mt-0.5 shadow-[0_2px_0_rgba(107,114,128,1)] text-nowrap">Enter</kbd>
-                    <span className="text-sm text-gray-300">Pressing Enter will automatically progress through the workflow: Calculate &rarr; Select top container result &rarr; Confirm best pack.</span>
-                  </li>
-                  <li className="flex items-start">
-                    <kbd className="bg-gray-700 border border-gray-500 rounded px-2 py-0.5 text-xs font-mono text-white mr-3 mt-0.5 shadow-[0_2px_0_rgba(107,114,128,1)]">Esc</kbd>
-                    <span className="text-sm text-gray-300">Close any open modal, window, or cancel a packing confirmation instantly.</span>
-                  </li>
-                </ul>
+                <p className="text-sm text-gray-400 mb-4">Built for alt-tabbing out of the game: switching back puts you in the amount field. Letter keys work there and anywhere outside other text fields.</p>
+                <div className="space-y-4">
+                  {SHORTCUT_GROUPS.map(group => (
+                    <div key={group.title}>
+                      <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">{group.title}</h4>
+                      <ul className="space-y-2">
+                        {group.items.map(([keys, text]) => (
+                          <li key={text} className="flex items-start gap-3">
+                            <span className="flex gap-1 flex-shrink-0 w-24 flex-wrap">
+                              {keys.map((k, i) => (
+                                <kbd key={i}className="bg-gray-700 border border-gray-500 rounded px-1.5 py-0.5 text-xs font-mono text-white shadow-[0_2px_0_rgba(107,114,128,1)] text-nowrap">{k}</kbd>
+                              ))}
+                            </span>
+                            <span className="text-sm text-gray-300">{text}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
               </div>
 
               <div>
